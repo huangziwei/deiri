@@ -338,7 +338,14 @@ document.addEventListener("keydown", (ev) => {
   const tag = ev.target?.tagName;
   if (tag === "INPUT" || tag === "TEXTAREA") return;
 
-  if (ev.key === "Backspace" || ev.key === "Delete") {
+  if ((ev.metaKey || ev.ctrlKey) && ev.key === "a") {
+    if (entries.length === 0) return;
+    ev.preventDefault();
+    selected.clear();
+    for (const e of entries) selected.add(pathFor(e.name));
+    anchorIndex = entries.length - 1;
+    updateSelectionDOM();
+  } else if (ev.key === "Backspace" || ev.key === "Delete") {
     if (selected.size === 0) return;
     ev.preventDefault();
     deleteSelected();
