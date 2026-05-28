@@ -1,0 +1,19 @@
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+node_modules/
+dist/
+.vite/
+
+# Swift build artifacts
+app/src-tauri/swift/.build/
+app/src-tauri/swift/*.a
+app/src-tauri/swift/*.o
+
+# Tauri
+app/src-tauri/gen/
+
+.DS_Store
+
+debug/

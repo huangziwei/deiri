@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability bundle for the main window — talks to mtp-core via the project's own commands and uses dialog + fs + opener plugins for native pickers and Reveal-in-Finder.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "dialog:allow-open",
+    "dialog:allow-confirm",
+    "dialog:allow-ask",
+    "dialog:allow-message",
+    "fs:default",
+    "opener:default"
+  ]
+}

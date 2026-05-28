@@ -1,0 +1,190 @@
+* { box-sizing: border-box; }
+:root { color-scheme: light dark; }
+
+body {
+  margin: 0;
+  font: 13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  background: #fff;
+  color: #222;
+}
+
+#app {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  height: 100vh;
+}
+
+/* Sidebar ----------------------------------------------------------------- */
+#sidebar {
+  background: #f4f4f6;
+  border-right: 1px solid #d8d8dc;
+  padding: 12px 8px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+#sidebar h2 {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #6b6b70;
+  margin: 0 4px;
+}
+#device-list { display: flex; flex-direction: column; gap: 2px; }
+.device {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 4px;
+  font: inherit;
+  color: inherit;
+}
+.device:hover { background: #e5e5e8; }
+.device.active { background: #d0d0d8; font-weight: 500; }
+#refresh-devices {
+  margin-top: auto;
+  padding: 6px 8px;
+  border: 1px solid #d0d0d4;
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
+}
+
+/* Main column ------------------------------------------------------------- */
+main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  position: relative;
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #e5e5e8;
+  background: #fafafb;
+}
+#up {
+  border: 1px solid #d0d0d4;
+  background: #fff;
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+#up:disabled { opacity: 0.4; cursor: default; }
+#breadcrumb {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#breadcrumb a {
+  cursor: pointer;
+  color: #0066cc;
+}
+#breadcrumb a:hover { text-decoration: underline; }
+#storage { color: #666; font-size: 12px; }
+
+/* List view --------------------------------------------------------------- */
+#list-container { flex: 1; overflow: auto; }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  user-select: none;
+}
+th, td { text-align: left; padding: 4px 12px; border-bottom: 1px solid #eee; }
+th {
+  background: #fafafb;
+  position: sticky;
+  top: 0;
+  cursor: pointer;
+  font-weight: 500;
+  z-index: 1;
+}
+tbody tr { cursor: default; }
+tbody tr:hover td { background: #f0f6ff; }
+tbody tr.selected td { background: #d0e3ff; }
+.cell-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cell-size, .cell-modified { color: #666; white-space: nowrap; }
+#empty {
+  padding: 32px;
+  text-align: center;
+  color: #888;
+}
+
+/* Drop overlay ------------------------------------------------------------ */
+#dropzone-overlay {
+  position: absolute;
+  inset: 8px;
+  background: rgba(0, 122, 255, 0.12);
+  border: 3px dashed #0066cc;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  color: #0066cc;
+  pointer-events: none;
+}
+/* The id selector above beats the UA `[hidden] { display: none }` rule, so
+   without this `hidden` is ignored and the overlay always shows. */
+#dropzone-overlay[hidden] { display: none; }
+
+/* Context menu --------------------------------------------------------- */
+#context-menu {
+  position: absolute;
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  background: #ffffff;
+  border: 1px solid #c8c8cc;
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  min-width: 180px;
+  z-index: 10;
+  font-size: 13px;
+}
+#context-menu[hidden] { display: none; }
+#context-menu li {
+  padding: 4px 14px;
+  cursor: default;
+  white-space: nowrap;
+}
+#context-menu li:hover:not(.disabled) { background: #2c7dff; color: #fff; }
+#context-menu li.disabled { color: #999; cursor: default; }
+#context-menu li.separator {
+  height: 1px;
+  padding: 0;
+  margin: 4px 6px;
+  background: #e5e5e8;
+}
+#context-menu li.separator:hover { background: #e5e5e8; }
+
+@media (prefers-color-scheme: dark) {
+  #context-menu { background: #2e2e32; border-color: #44444a; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5); }
+  #context-menu li.separator { background: #44444a; }
+}
+
+@media (prefers-color-scheme: dark) {
+  body { background: #1e1e20; color: #e8e8ea; }
+  #sidebar { background: #252528; border-right-color: #36363a; }
+  .device:hover { background: #34343a; }
+  .device.active { background: #44444a; }
+  #refresh-devices { background: #2c2c30; border-color: #44444a; color: inherit; }
+  header { background: #252528; border-bottom-color: #36363a; }
+  #up { background: #2c2c30; border-color: #44444a; color: inherit; }
+  th { background: #252528; }
+  th, td { border-bottom-color: #2e2e32; }
+  tbody tr:hover td { background: #2a3340; }
+  tbody tr.selected td { background: #2c4474; }
+  .cell-size, .cell-modified, #storage { color: #999; }
+  #sidebar h2 { color: #999; }
+}
