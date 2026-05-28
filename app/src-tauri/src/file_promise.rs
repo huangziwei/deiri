@@ -53,26 +53,41 @@ unsafe extern "C" fn resolver_trampoline(
     dest_posix_path: *const c_char,
     _user_ctx: *const c_void,
 ) -> bool {
-    // catch_unwind because the resolver runs on Swift's queue — a Rust panic
-    // crossing back over the FFI boundary is UB. Convert to logged failure
-    // and a false return so AppKit shows "drop failed" instead of crashing.
-    let outcome = std::panic::catch_unwind(|| -> anyhow::Result<()> {
-        let object_path = unsafe { CStr::from_ptr(object_path) }
-            .to_str()
-            .map_err(|e| anyhow::anyhow!("non-UTF-8 device path: {e}"))?
-            .to_string();
-        let dest_path = unsafe { CStr::from_ptr(dest_posix_path) }
-            .to_str()
-            .map_err(|e| anyhow::anyhow!("non-UTF-8 dest path: {e}"))?;
-        let dest_path = PathBuf::from(dest_path);
+    // Pull the FFI strings out first so we own them before crossing threads.
+    let object_path = match unsafe { CStr::from_ptr(object_path) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(e) => {
+            tracing::error!(?e, "drag-out: non-UTF-8 device path");
+            return false;
+        }
+    };
+    let dest_path = match unsafe { CStr::from_ptr(dest_posix_path) }.to_str() {
+        Ok(s) => PathBuf::from(s),
+        Err(e) => {
+            tracing::error!(?e, "drag-out: non-UTF-8 dest path");
+            return false;
+        }
+    };
 
+    // AppKit hands us a Grand Central Dispatch worker thread (Swift's
+    // `DispatchQueue.global(...).async` in `writePromiseTo`). nusb's macOS
+    // backend wires its async USB transfers to an IOKit event source that
+    // expects a CFRunLoop-style host thread; on a GCD pool thread the very
+    // first bulk-IN transfer comes back kIOReturnNotResponding (0xe00002ed)
+    // and the endpoint goes into stall, breaking every subsequent transfer
+    // on the same pipe. Hop to a fresh pthread so the USB I/O runs in an
+    // environment nusb knows how to deal with. We still block here so
+    // AppKit's NSFilePromiseProvider contract (sync write into the supplied
+    // URL) is honoured.
+    let worker = std::thread::spawn(move || -> anyhow::Result<()> {
         let handle = APP_HANDLE
             .get()
             .ok_or_else(|| anyhow::anyhow!("AppHandle not initialized"))?;
         let state: tauri::State<AppState> = handle.state();
         state.with_fs(|fs| fs.download_to(&mtp_core::TPath::parse(&object_path), &dest_path))
     });
-    match outcome {
+
+    match worker.join() {
         Ok(Ok(())) => true,
         Ok(Err(e)) => {
             tracing::error!(error = ?e, "drag-out resolver failed");
