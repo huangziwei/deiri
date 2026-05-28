@@ -24,6 +24,10 @@ pub struct Entry {
     /// Lets the UI decide whether to attempt a `get_thumbnail` fetch without
     /// a per-entry probe.
     pub has_thumbnail: bool,
+    /// Raw PTP `ObjectHandle` value. Stable for the lifetime of an open MTP
+    /// session; the frontend hands it back to `get_thumbnail_by_id` so we skip
+    /// the per-call path resolve (which is N round-trips for N path segments).
+    pub object_id: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -40,11 +44,12 @@ pub trait Fs: Send + Sync {
     /// Download `path` to a local file. Used by the drag-out promise callback.
     fn download_to(&self, path: &TPath, dest: &Path) -> Result<()>;
 
-    /// Fetch the camera-supplied thumbnail for `path`. Bytes are whatever
-    /// `thumb_format` says (usually JPEG). Returns an error if the device has
+    /// Fetch the thumbnail for the given raw PTP object handle. The id must
+    /// come from a previous [`Entry::object_id`] on the *same* session — handles
+    /// are not stable across reconnects. Returns an error if the device has
     /// no thumbnail for the object — callers should check [`Entry::has_thumbnail`]
-    /// before calling.
-    fn get_thumbnail(&self, path: &TPath) -> Result<Vec<u8>>;
+    /// before calling. Bytes are whatever `thumb_format` says (usually JPEG).
+    fn get_thumbnail_by_id(&self, object_id: u32) -> Result<Vec<u8>>;
 
     /// Upload a local file into `dest`. Atomic on success; nothing visible at
     /// `dest` if interrupted.

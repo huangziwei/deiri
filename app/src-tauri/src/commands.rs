@@ -14,6 +14,7 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use crate::state::{AppState, OpenSession};
+use crate::thumb_protocol;
 
 fn err(e: anyhow::Error) -> String {
     tracing::error!(?e, "command failed");
@@ -35,8 +36,17 @@ pub struct OpenDeviceArgs {
 }
 
 #[tauri::command]
-pub fn open_device(args: OpenDeviceArgs, state: State<AppState>) -> Result<(), String> {
+pub fn open_device(
+    app: AppHandle,
+    args: OpenDeviceArgs,
+    state: State<AppState>,
+) -> Result<(), String> {
     let fs = MtpFs::open(args.location_id).map_err(err)?;
+    // Wipe any cached thumbs from a prior session with this device — PTP
+    // object handles are not guaranteed stable across sessions, so a fresh
+    // session must rebuild its cache. We do this after the open succeeds so a
+    // failed open doesn't trash a still-good cache.
+    thumb_protocol::clear_for_device(&app, &args.device_id);
     let mut guard = state.current.lock().map_err(|_| "session lock poisoned".to_string())?;
     *guard = Some(OpenSession {
         device_id: args.device_id,
@@ -100,16 +110,6 @@ pub struct DownloadArgs {
 pub fn download_to(args: DownloadArgs, state: State<AppState>) -> Result<(), String> {
     let src = TPath::parse(&args.source);
     state.with_fs(|fs| fs.download_to(&src, &args.dest)).map_err(err)
-}
-
-#[tauri::command]
-pub fn get_thumbnail(path: String, state: State<AppState>) -> Result<Vec<u8>, String> {
-    // Bytes are whatever format the camera embedded — JPEG in every device
-    // we've seen, but the frontend uses a Blob with image/jpeg either way
-    // since browsers sniff the magic.
-    state
-        .with_fs(|fs| fs.get_thumbnail(&TPath::parse(&path)))
-        .map_err(err)
 }
 
 #[derive(Deserialize)]

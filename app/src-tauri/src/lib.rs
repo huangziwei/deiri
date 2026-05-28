@@ -1,5 +1,6 @@
 mod commands;
 mod state;
+mod thumb_protocol;
 
 #[cfg(target_os = "macos")]
 mod file_promise;
@@ -18,7 +19,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(state::AppState::default());
+        .manage(state::AppState::default())
+        // `thumb://localhost/<object_id>` — grid view thumbnails. See
+        // `thumb_protocol.rs` for why we serve these via a URI scheme rather
+        // than a Tauri command.
+        .register_uri_scheme_protocol("thumb", thumb_protocol::handle);
 
     #[cfg(target_os = "macos")]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -29,7 +34,6 @@ pub fn run() {
         commands::storage_info,
         commands::upload_files,
         commands::download_to,
-        commands::get_thumbnail,
         commands::delete,
         commands::create_dir,
         commands::pick_folder,
@@ -47,7 +51,6 @@ pub fn run() {
         commands::storage_info,
         commands::upload_files,
         commands::download_to,
-        commands::get_thumbnail,
         commands::delete,
         commands::create_dir,
         commands::pick_folder,

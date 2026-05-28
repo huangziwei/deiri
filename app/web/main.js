@@ -31,20 +31,11 @@ let sortKey = "name";
 let sortDir = "asc";
 let viewMode = "list"; // "list" or "grid"
 
-// Per-listing thumbnail cache: device-relative path → object URL.
-// Cleared on every refreshList so we don't keep blob URLs alive across
-// folder changes (each one pins a Vec<u8> in the WebView).
-const thumbCache = new Map();
-let thumbObserver = null;
-// Cap concurrent get_thumbnail IPC calls. Each one serializes through the
-// MTP session mutex on the Rust side, and Tauri's command workers are
-// finite — flooding 50+ calls at once on a folder of camera shots freezes
-// the UI while the queue drains.
-const MAX_THUMB_LOADS = 4;
-const thumbQueue = [];
-let activeThumbLoads = 0;
-// Bumped on every render so in-flight loads can detect that the user
-// switched view mode or folder and bail instead of writing into stale DOM.
+// Bumped on every render so chunked-build pumps can detect that the user
+// switched view mode or folder and bail mid-stream. Thumbnails themselves
+// are now <img src="thumb://..."> — the WebView's URL scheme handler talks
+// to the Rust side directly (see app/src-tauri/src/thumb_protocol.rs), with
+// a disk-backed cache and native lazy-loading driving the work.
 let renderGen = 0;
 
 // Selection. Holds device-relative paths (`cwd` + name) so it's stable
@@ -130,12 +121,6 @@ function sortEntries() {
 function renderList() {
   sortEntries();
   renderGen++;
-  resetThumbObserver();
-  thumbQueue.length = 0;
-  // Free any blob URLs we built on the prior render — viewMode swaps and
-  // folder changes both go through here.
-  for (const url of thumbCache.values()) URL.revokeObjectURL(url);
-  thumbCache.clear();
 
   if (entries.length === 0 && openDeviceId) {
     emptyEl.textContent = "Empty folder.";
@@ -221,9 +206,21 @@ function buildTile(e, idx) {
   if (e.is_dir) {
     thumbBox.textContent = "📁";
   } else if (e.has_thumbnail) {
-    thumbBox.textContent = "🖼";
-    thumbBox.dataset.path = pathFor(e.name);
-    if (thumbObserver) thumbObserver.observe(thumbBox);
+    // The Rust side serves thumb:// directly (no IPC marshaling of Vec<u8>),
+    // so we can just point an <img> at it and let the browser handle lazy
+    // loading + off-thread decode. `decoding="async"` keeps decode off the
+    // main thread even for the first paint; `loading="lazy"` defers fetch
+    // until the tile is near the viewport. If the device claimed
+    // has_thumbnail but the fetch 404s, fall back to the file glyph.
+    const img = document.createElement("img");
+    img.src = `thumb://localhost/${e.object_id}`;
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.draggable = false;
+    img.addEventListener("error", () => {
+      thumbBox.textContent = "📄";
+    });
+    thumbBox.appendChild(img);
   } else {
     thumbBox.textContent = "📄";
   }
@@ -243,65 +240,6 @@ function buildTile(e, idx) {
   tile.addEventListener("contextmenu", (ev) => onRowContextMenu(idx, ev));
   if (!e.is_dir) attachDragOut(tile, e);
   return tile;
-}
-
-function resetThumbObserver() {
-  if (thumbObserver) thumbObserver.disconnect();
-  thumbObserver = new IntersectionObserver(
-    (entries) => {
-      for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        thumbObserver.unobserve(entry.target);
-        enqueueThumbLoad(entry.target);
-      }
-    },
-    { root: $("list-container"), rootMargin: "200px" }
-  );
-}
-
-function enqueueThumbLoad(box) {
-  thumbQueue.push({ box, gen: renderGen });
-  pumpThumbQueue();
-}
-
-function pumpThumbQueue() {
-  while (activeThumbLoads < MAX_THUMB_LOADS && thumbQueue.length > 0) {
-    const { box, gen } = thumbQueue.shift();
-    if (gen !== renderGen || !box.isConnected) continue;
-    activeThumbLoads++;
-    loadThumbnail(box, gen).finally(() => {
-      activeThumbLoads--;
-      pumpThumbQueue();
-    });
-  }
-}
-
-async function loadThumbnail(box, gen) {
-  const path = box.dataset.path;
-  if (!path) return;
-  if (thumbCache.has(path)) {
-    showThumb(box, thumbCache.get(path));
-    return;
-  }
-  try {
-    const bytes = await window.api.invoke("get_thumbnail", { path });
-    if (gen !== renderGen || !box.isConnected) return; // user moved on
-    const blob = new Blob([new Uint8Array(bytes)], { type: "image/jpeg" });
-    const url = URL.createObjectURL(blob);
-    thumbCache.set(path, url);
-    showThumb(box, url);
-  } catch (err) {
-    console.warn("thumbnail failed", path, err);
-    // Leave the placeholder glyph in place; not worth alerting the user.
-  }
-}
-
-function showThumb(box, url) {
-  box.textContent = "";
-  const img = document.createElement("img");
-  img.src = url;
-  img.loading = "lazy";
-  box.appendChild(img);
 }
 
 // ---------------------------------------------------------------------------

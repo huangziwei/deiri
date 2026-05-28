@@ -16,10 +16,9 @@ pub struct AppState {
 
 pub struct OpenSession {
     /// Device id (USB serial when available — see [`mtp_core::DeviceDescriptor::id`]).
-    /// Not read yet; kept so a future "did the device reconnect on a new
-    /// location_id?" check can compare against the descriptor returned by
-    /// `list_devices`.
-    #[allow(dead_code)]
+    /// Read by the thumbnail URI handler to namespace the on-disk thumb cache
+    /// per device, so swapping between two devices doesn't blow each other's
+    /// cache away.
     pub device_id: String,
     pub fs: MtpFs,
 }
@@ -39,5 +38,19 @@ impl AppState {
             .as_ref()
             .ok_or_else(|| anyhow!("no device open"))?;
         f(&session.fs)
+    }
+
+    /// Snapshot the open session's device id for cache keying. Separate from
+    /// [`Self::with_fs`] so the thumb URI handler can compute its disk cache
+    /// path before deciding whether to take the (slow) op_lock.
+    pub fn device_id(&self) -> Result<String> {
+        let guard = self
+            .current
+            .lock()
+            .map_err(|_| anyhow!("session lock poisoned"))?;
+        guard
+            .as_ref()
+            .map(|s| s.device_id.clone())
+            .ok_or_else(|| anyhow!("no device open"))
     }
 }

@@ -141,6 +141,7 @@ impl Fs for MtpFs {
                     // follow-up — the list view can sort by name in v0.
                     modified_at: None,
                     has_thumbnail: o.thumb_size > 0,
+                    object_id: o.handle.0,
                 })
                 .collect())
         })
@@ -172,15 +173,11 @@ impl Fs for MtpFs {
         })
     }
 
-    fn get_thumbnail(&self, path: &TPath) -> Result<Vec<u8>> {
+    fn get_thumbnail_by_id(&self, object_id: u32) -> Result<Vec<u8>> {
         let _g = self.op_lock.lock().expect("op_lock poisoned");
         block_on(async {
-            let handle = self
-                .resolve(path)
-                .await?
-                .ok_or_else(|| anyhow!("get_thumbnail: object not found at `{path}`"))?;
             self.storage
-                .download_thumbnail(handle)
+                .download_thumbnail(ObjectHandle(object_id))
                 .await
                 .map_err(map_err)
         })
