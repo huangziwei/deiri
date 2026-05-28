@@ -102,6 +102,16 @@ pub fn download_to(args: DownloadArgs, state: State<AppState>) -> Result<(), Str
     state.with_fs(|fs| fs.download_to(&src, &args.dest)).map_err(err)
 }
 
+#[tauri::command]
+pub fn get_thumbnail(path: String, state: State<AppState>) -> Result<Vec<u8>, String> {
+    // Bytes are whatever format the camera embedded — JPEG in every device
+    // we've seen, but the frontend uses a Blob with image/jpeg either way
+    // since browsers sniff the magic.
+    state
+        .with_fs(|fs| fs.get_thumbnail(&TPath::parse(&path)))
+        .map_err(err)
+}
+
 #[derive(Deserialize)]
 pub struct DeleteArgs {
     pub path: String,

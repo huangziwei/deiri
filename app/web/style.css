@@ -95,8 +95,68 @@ header {
 #breadcrumb a:hover { text-decoration: underline; }
 #storage { color: #666; font-size: 12px; }
 
+/* View toggle ------------------------------------------------------------- */
+#view-toggle { display: flex; gap: 2px; }
+#view-toggle button {
+  border: 1px solid #d0d0d4;
+  background: #fff;
+  padding: 2px 8px;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+#view-toggle button:first-child { border-radius: 4px 0 0 4px; }
+#view-toggle button:last-child { border-radius: 0 4px 4px 0; border-left: 0; }
+#view-toggle button.active { background: #d0e3ff; }
+
 /* List view --------------------------------------------------------------- */
-#list-container { flex: 1; overflow: auto; }
+#list-container { flex: 1; overflow: auto; position: relative; }
+
+/* Grid view --------------------------------------------------------------- */
+#grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+  padding: 12px;
+}
+.tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 4px;
+  border-radius: 6px;
+  cursor: default;
+}
+.tile:hover { background: #f0f6ff; }
+.tile.selected { background: #d0e3ff; }
+.tile-thumb {
+  width: 120px;
+  height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f4f4f6;
+  border-radius: 4px;
+  overflow: hidden;
+  font-size: 40px;
+  color: #aaa;
+}
+.tile-thumb img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.tile-name {
+  font-size: 12px;
+  text-align: center;
+  word-break: break-all;
+  /* Two-line clamp so long camera filenames don't stretch tiles. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 table {
   width: 100%;
   border-collapse: collapse;
@@ -189,4 +249,9 @@ tbody tr.selected td { background: #d0e3ff; }
   tbody tr.selected td { background: #2c4474; }
   .cell-size, .cell-modified, #storage { color: #999; }
   #sidebar h2 { color: #999; }
+  #view-toggle button { background: #2c2c30; border-color: #44444a; color: inherit; }
+  #view-toggle button.active { background: #2c4474; }
+  .tile:hover { background: #2a3340; }
+  .tile.selected { background: #2c4474; }
+  .tile-thumb { background: #2c2c30; color: #666; }
 }

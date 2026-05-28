@@ -140,6 +140,7 @@ impl Fs for MtpFs {
                     // datetime string ("YYYYMMDDTHHMMSS"). Parsing left to a
                     // follow-up — the list view can sort by name in v0.
                     modified_at: None,
+                    has_thumbnail: o.thumb_size > 0,
                 })
                 .collect())
         })
@@ -168,6 +169,20 @@ impl Fs for MtpFs {
             std::fs::write(dest, &bytes)
                 .with_context(|| format!("write {} ({} bytes)", dest.display(), bytes.len()))?;
             Ok(())
+        })
+    }
+
+    fn get_thumbnail(&self, path: &TPath) -> Result<Vec<u8>> {
+        let _g = self.op_lock.lock().expect("op_lock poisoned");
+        block_on(async {
+            let handle = self
+                .resolve(path)
+                .await?
+                .ok_or_else(|| anyhow!("get_thumbnail: object not found at `{path}`"))?;
+            self.storage
+                .download_thumbnail(handle)
+                .await
+                .map_err(map_err)
         })
     }
 

@@ -20,6 +20,10 @@ pub struct Entry {
     /// Unix epoch seconds. `None` when the device doesn't report it or the
     /// transport hasn't parsed the MTP date string yet.
     pub modified_at: Option<i64>,
+    /// True if the device reports a non-zero `thumb_size` for this object.
+    /// Lets the UI decide whether to attempt a `get_thumbnail` fetch without
+    /// a per-entry probe.
+    pub has_thumbnail: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -35,6 +39,12 @@ pub trait Fs: Send + Sync {
 
     /// Download `path` to a local file. Used by the drag-out promise callback.
     fn download_to(&self, path: &TPath, dest: &Path) -> Result<()>;
+
+    /// Fetch the camera-supplied thumbnail for `path`. Bytes are whatever
+    /// `thumb_format` says (usually JPEG). Returns an error if the device has
+    /// no thumbnail for the object — callers should check [`Entry::has_thumbnail`]
+    /// before calling.
+    fn get_thumbnail(&self, path: &TPath) -> Result<Vec<u8>>;
 
     /// Upload a local file into `dest`. Atomic on success; nothing visible at
     /// `dest` if interrupted.

@@ -10,11 +10,15 @@ const $ = (id) => {
 const deviceListEl = $("device-list");
 const breadcrumbEl = $("breadcrumb");
 const storageEl = $("storage");
+const listEl = $("list");
 const listBody = $("list-body");
+const gridEl = $("grid");
 const emptyEl = $("empty");
 const dropzone = $("dropzone-overlay");
 const contextMenu = $("context-menu");
 const upBtn = $("up");
+const viewListBtn = $("view-list");
+const viewGridBtn = $("view-grid");
 const refreshDevicesBtn = $("refresh-devices");
 
 // ---------------------------------------------------------------------------
@@ -25,6 +29,23 @@ let cwd = ""; // device-relative, no leading slash
 let entries = [];
 let sortKey = "name";
 let sortDir = "asc";
+let viewMode = "list"; // "list" or "grid"
+
+// Per-listing thumbnail cache: device-relative path → object URL.
+// Cleared on every refreshList so we don't keep blob URLs alive across
+// folder changes (each one pins a Vec<u8> in the WebView).
+const thumbCache = new Map();
+let thumbObserver = null;
+// Cap concurrent get_thumbnail IPC calls. Each one serializes through the
+// MTP session mutex on the Rust side, and Tauri's command workers are
+// finite — flooding 50+ calls at once on a folder of camera shots freezes
+// the UI while the queue drains.
+const MAX_THUMB_LOADS = 4;
+const thumbQueue = [];
+let activeThumbLoads = 0;
+// Bumped on every render so in-flight loads can detect that the user
+// switched view mode or folder and bail instead of writing into stale DOM.
+let renderGen = 0;
 
 // Selection. Holds device-relative paths (`cwd` + name) so it's stable
 // across re-renders. Cleared on every refreshList — selection only lives
@@ -108,7 +129,14 @@ function sortEntries() {
 
 function renderList() {
   sortEntries();
-  listBody.innerHTML = "";
+  renderGen++;
+  resetThumbObserver();
+  thumbQueue.length = 0;
+  // Free any blob URLs we built on the prior render — viewMode swaps and
+  // folder changes both go through here.
+  for (const url of thumbCache.values()) URL.revokeObjectURL(url);
+  thumbCache.clear();
+
   if (entries.length === 0 && openDeviceId) {
     emptyEl.textContent = "Empty folder.";
     emptyEl.hidden = false;
@@ -116,6 +144,15 @@ function renderList() {
     emptyEl.hidden = entries.length > 0 || !!openDeviceId;
     if (!openDeviceId) emptyEl.textContent = "No device selected.";
   }
+
+  listEl.hidden = viewMode !== "list";
+  gridEl.hidden = viewMode !== "grid";
+  if (viewMode === "list") renderListView();
+  else renderGridView();
+}
+
+function renderListView() {
+  listBody.innerHTML = "";
   entries.forEach((e, idx) => {
     const tr = document.createElement("tr");
     tr.dataset.name = e.name;
@@ -152,6 +189,121 @@ function renderList() {
   });
 }
 
+function renderGridView() {
+  gridEl.innerHTML = "";
+  // Camera folders can hold hundreds of shots; building all tiles in one
+  // synchronous pass freezes the WebView. Chunk across animation frames so
+  // the first screen paints fast and the rest fills in.
+  const CHUNK = 80;
+  const myGen = renderGen;
+  let i = 0;
+  function pump() {
+    if (myGen !== renderGen) return; // user navigated away; abandon
+    const end = Math.min(i + CHUNK, entries.length);
+    const frag = document.createDocumentFragment();
+    for (; i < end; i++) frag.appendChild(buildTile(entries[i], i));
+    gridEl.appendChild(frag);
+    if (i < entries.length) requestAnimationFrame(pump);
+  }
+  pump();
+}
+
+function buildTile(e, idx) {
+  const tile = document.createElement("div");
+  tile.className = "tile";
+  tile.dataset.name = e.name;
+  tile.dataset.isDir = String(e.is_dir);
+  tile.dataset.idx = String(idx);
+  if (selected.has(pathFor(e.name))) tile.classList.add("selected");
+
+  const thumbBox = document.createElement("div");
+  thumbBox.className = "tile-thumb";
+  if (e.is_dir) {
+    thumbBox.textContent = "📁";
+  } else if (e.has_thumbnail) {
+    thumbBox.textContent = "🖼";
+    thumbBox.dataset.path = pathFor(e.name);
+    if (thumbObserver) thumbObserver.observe(thumbBox);
+  } else {
+    thumbBox.textContent = "📄";
+  }
+
+  const nameEl = document.createElement("div");
+  nameEl.className = "tile-name";
+  nameEl.textContent = e.name;
+  tile.append(thumbBox, nameEl);
+
+  tile.addEventListener("click", (ev) => onRowClick(idx, ev));
+  tile.addEventListener("dblclick", () => {
+    if (e.is_dir) {
+      cwd = cwd ? `${cwd}/${e.name}` : e.name;
+      refreshList();
+    }
+  });
+  tile.addEventListener("contextmenu", (ev) => onRowContextMenu(idx, ev));
+  if (!e.is_dir) attachDragOut(tile, e);
+  return tile;
+}
+
+function resetThumbObserver() {
+  if (thumbObserver) thumbObserver.disconnect();
+  thumbObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        thumbObserver.unobserve(entry.target);
+        enqueueThumbLoad(entry.target);
+      }
+    },
+    { root: $("list-container"), rootMargin: "200px" }
+  );
+}
+
+function enqueueThumbLoad(box) {
+  thumbQueue.push({ box, gen: renderGen });
+  pumpThumbQueue();
+}
+
+function pumpThumbQueue() {
+  while (activeThumbLoads < MAX_THUMB_LOADS && thumbQueue.length > 0) {
+    const { box, gen } = thumbQueue.shift();
+    if (gen !== renderGen || !box.isConnected) continue;
+    activeThumbLoads++;
+    loadThumbnail(box, gen).finally(() => {
+      activeThumbLoads--;
+      pumpThumbQueue();
+    });
+  }
+}
+
+async function loadThumbnail(box, gen) {
+  const path = box.dataset.path;
+  if (!path) return;
+  if (thumbCache.has(path)) {
+    showThumb(box, thumbCache.get(path));
+    return;
+  }
+  try {
+    const bytes = await window.api.invoke("get_thumbnail", { path });
+    if (gen !== renderGen || !box.isConnected) return; // user moved on
+    const blob = new Blob([new Uint8Array(bytes)], { type: "image/jpeg" });
+    const url = URL.createObjectURL(blob);
+    thumbCache.set(path, url);
+    showThumb(box, url);
+  } catch (err) {
+    console.warn("thumbnail failed", path, err);
+    // Leave the placeholder glyph in place; not worth alerting the user.
+  }
+}
+
+function showThumb(box, url) {
+  box.textContent = "";
+  const img = document.createElement("img");
+  img.src = url;
+  img.loading = "lazy";
+  box.appendChild(img);
+}
+
 // ---------------------------------------------------------------------------
 // Selection
 
@@ -179,8 +331,11 @@ function onRowClick(idx, ev) {
 }
 
 function updateSelectionDOM() {
-  listBody.querySelectorAll("tr").forEach((tr) => {
-    tr.classList.toggle("selected", selected.has(pathFor(tr.dataset.name)));
+  const nodes = viewMode === "list"
+    ? listBody.querySelectorAll("tr")
+    : gridEl.querySelectorAll(".tile");
+  nodes.forEach((n) => {
+    n.classList.toggle("selected", selected.has(pathFor(n.dataset.name)));
   });
 }
 
@@ -493,6 +648,17 @@ function humanSize(n) {
 }
 
 refreshDevicesBtn.addEventListener("click", refreshDevices);
+
+viewListBtn.addEventListener("click", () => setViewMode("list"));
+viewGridBtn.addEventListener("click", () => setViewMode("grid"));
+
+function setViewMode(mode) {
+  if (viewMode === mode) return;
+  viewMode = mode;
+  viewListBtn.classList.toggle("active", mode === "list");
+  viewGridBtn.classList.toggle("active", mode === "grid");
+  renderList();
+}
 
 // ---------------------------------------------------------------------------
 // Boot

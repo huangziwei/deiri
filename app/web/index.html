@@ -17,6 +17,10 @@
         <header>
           <button id="up" title="Up one folder">↑</button>
           <nav id="breadcrumb"></nav>
+          <div id="view-toggle" role="group">
+            <button id="view-list" class="active" title="List view">☰</button>
+            <button id="view-grid" title="Grid view">▦</button>
+          </div>
           <div id="storage"></div>
         </header>
         <div id="list-container">
@@ -30,6 +34,7 @@
             </thead>
             <tbody id="list-body"></tbody>
           </table>
+          <div id="grid" hidden></div>
           <div id="empty">No device selected.</div>
         </div>
         <div id="dropzone-overlay" hidden>Drop to upload</div>
