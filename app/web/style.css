@@ -11,60 +11,103 @@ body {
 }
 
 #app {
-  display: grid;
-  grid-template-columns: 220px 1fr;
-  height: 100vh;
-}
-
-/* Sidebar ----------------------------------------------------------------- */
-#sidebar {
-  background: #f4f4f6;
-  border-right: 1px solid #d8d8dc;
-  padding: 12px 8px;
-  overflow: auto;
   display: flex;
   flex-direction: column;
+  height: 100vh;
+  min-width: 0;
+  position: relative;
+}
+
+/* Device chip + popover ---------------------------------------------------- */
+/* Single source of device UI. Lives in the header on the left; popover lists
+   all connected devices when there's more than one. Hidden chevron when there
+   are 0 or 1 devices since there's nothing to switch to. */
+#device-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 240px;
+  padding: 3px 8px;
+  border: 1px solid #d0d0d4;
+  border-radius: 4px;
+  background: #fff;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+#device-chip:hover { background: #f0f0f4; }
+#device-chip.is-open { background: #e8e8ec; }
+#device-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+#device-chip.no-device #device-chip-label { font-weight: 400; color: #888; }
+#device-chip-chevron { font-size: 9px; color: #888; }
+#device-chip.solo #device-chip-chevron { display: none; }
+
+#device-menu {
+  position: absolute;
+  top: 38px;
+  left: 12px;
+  min-width: 220px;
+  max-width: 320px;
+  background: #ffffff;
+  border: 1px solid #c8c8cc;
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  padding: 4px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+#device-menu[hidden] { display: none; }
+.device-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  border-radius: 4px;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-#sidebar h2 {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: #6b6b70;
-  margin: 0 4px;
+.device-menu-item:hover { background: #f0f0f4; }
+.device-menu-item.active { background: #d0e3ff; font-weight: 500; }
+.device-menu-item .check { color: #2c7dff; font-size: 11px; }
+.device-menu-empty {
+  padding: 8px;
+  color: #888;
+  font-style: italic;
 }
-#device-list { display: flex; flex-direction: column; gap: 2px; }
-.device {
+.device-menu-sep {
+  height: 1px;
+  background: #e5e5e8;
+  margin: 4px 6px;
+}
+.device-menu-refresh {
   display: block;
   width: 100%;
   text-align: left;
   padding: 6px 8px;
   border: 0;
   background: transparent;
-  cursor: pointer;
   border-radius: 4px;
   font: inherit;
-  color: inherit;
-}
-.device:hover { background: #e5e5e8; }
-.device.active { background: #d0d0d8; font-weight: 500; }
-#refresh-devices {
-  margin-top: auto;
-  padding: 6px 8px;
-  border: 1px solid #d0d0d4;
-  border-radius: 4px;
-  background: #fff;
+  color: #0066cc;
   cursor: pointer;
 }
+.device-menu-refresh:hover { background: #f0f0f4; }
 
-/* Main column ------------------------------------------------------------- */
-main {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  position: relative;
-}
 header {
   display: flex;
   align-items: center;
@@ -241,18 +284,21 @@ tbody tr.selected td { background: #d0e3ff; }
 
 @media (prefers-color-scheme: dark) {
   body { background: #1e1e20; color: #e8e8ea; }
-  #sidebar { background: #252528; border-right-color: #36363a; }
-  .device:hover { background: #34343a; }
-  .device.active { background: #44444a; }
-  #refresh-devices { background: #2c2c30; border-color: #44444a; color: inherit; }
   header { background: #252528; border-bottom-color: #36363a; }
   #up { background: #2c2c30; border-color: #44444a; color: inherit; }
+  #device-chip { background: #2c2c30; border-color: #44444a; color: inherit; }
+  #device-chip:hover { background: #34343a; }
+  #device-chip.is-open { background: #3a3a40; }
+  #device-menu { background: #2e2e32; border-color: #44444a; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5); }
+  .device-menu-item:hover { background: #34343a; }
+  .device-menu-item.active { background: #2c4474; }
+  .device-menu-sep { background: #44444a; }
+  .device-menu-refresh:hover { background: #34343a; }
   th { background: #252528; }
   th, td { border-bottom-color: #2e2e32; }
   tbody tr:hover td { background: #2a3340; }
   tbody tr.selected td { background: #2c4474; }
   .cell-size, .cell-modified, #storage { color: #999; }
-  #sidebar h2 { color: #999; }
   #view-toggle button { background: #2c2c30; border-color: #44444a; color: inherit; }
   #view-toggle button.active { background: #2c4474; }
   .tile:hover { background: #2a3340; }

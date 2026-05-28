@@ -7,7 +7,9 @@ const $ = (id) => {
   return el;
 };
 
-const deviceListEl = $("device-list");
+const deviceChip = $("device-chip");
+const deviceChipLabel = $("device-chip-label");
+const deviceMenu = $("device-menu");
 const breadcrumbEl = $("breadcrumb");
 const storageEl = $("storage");
 const listEl = $("list");
@@ -19,7 +21,6 @@ const contextMenu = $("context-menu");
 const upBtn = $("up");
 const viewListBtn = $("view-list");
 const viewGridBtn = $("view-grid");
-const refreshDevicesBtn = $("refresh-devices");
 
 // ---------------------------------------------------------------------------
 // App state
@@ -49,28 +50,108 @@ function pathFor(name) {
 }
 
 // ---------------------------------------------------------------------------
-// Device sidebar
+// Devices
+//
+// Single source of device UI is the header chip + its popover menu. There's
+// no persistent sidebar — most of the time exactly one device is connected
+// and the chip stays out of the way. Clicking the chip re-enumerates and
+// shows a list when there's more than one to pick from.
 
-async function refreshDevices() {
-  const devices = await window.api.invoke("list_devices");
-  deviceListEl.innerHTML = "";
-  if (devices.length === 0) {
-    const placeholder = document.createElement("div");
-    placeholder.className = "device";
-    placeholder.style.color = "#888";
-    placeholder.textContent = "(no MTP devices)";
-    deviceListEl.appendChild(placeholder);
+let lastDevices = [];
+
+async function refreshDevices({ autoOpen = false } = {}) {
+  let devices;
+  try {
+    devices = await window.api.invoke("list_devices");
+  } catch (err) {
+    console.error("list_devices failed", err);
+    devices = [];
+  }
+  lastDevices = devices;
+  updateDeviceChip();
+  // If the menu is open, re-render so a hot-plug shows up immediately.
+  if (!deviceMenu.hidden) renderDeviceMenu();
+
+  if (autoOpen && !openDeviceId && devices.length > 0) {
+    // Multi-device at startup: open the first. The user can switch via the
+    // chip; the alphabetical order from list_devices is stable enough that
+    // "first" is a meaningful concept.
+    await openDevice(devices[0]);
+  }
+}
+
+function updateDeviceChip() {
+  const open = lastDevices.find((d) => d.id === openDeviceId);
+  deviceChipLabel.textContent = open ? open.label : "No device";
+  deviceChip.title = open
+    ? `${open.vendor_id.toString(16)}:${open.product_id.toString(16)} · ${open.id}`
+    : "Pick a device";
+  deviceChip.classList.toggle("no-device", !open);
+  // Hide the chevron when there's nothing to switch to — the chip then reads
+  // as a label rather than a control. Still clickable to refresh.
+  deviceChip.classList.toggle("solo", lastDevices.length <= 1);
+}
+
+function renderDeviceMenu() {
+  deviceMenu.innerHTML = "";
+  if (lastDevices.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "device-menu-empty";
+    empty.textContent = "No MTP devices detected.";
+    deviceMenu.appendChild(empty);
+  } else {
+    for (const d of lastDevices) {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "device-menu-item";
+      if (d.id === openDeviceId) item.classList.add("active");
+      item.title = `${d.vendor_id.toString(16)}:${d.product_id.toString(16)} · ${d.id}`;
+      const label = document.createElement("span");
+      label.textContent = d.label;
+      item.appendChild(label);
+      if (d.id === openDeviceId) {
+        const check = document.createElement("span");
+        check.className = "check";
+        check.textContent = "✓";
+        item.appendChild(check);
+      }
+      item.addEventListener("click", async () => {
+        hideDeviceMenu();
+        if (d.id !== openDeviceId) await openDevice(d);
+      });
+      deviceMenu.appendChild(item);
+    }
+  }
+  const sep = document.createElement("div");
+  sep.className = "device-menu-sep";
+  deviceMenu.appendChild(sep);
+  const refresh = document.createElement("button");
+  refresh.type = "button";
+  refresh.className = "device-menu-refresh";
+  refresh.textContent = "Refresh";
+  refresh.addEventListener("click", async () => {
+    await refreshDevices();
+    renderDeviceMenu();
+  });
+  deviceMenu.appendChild(refresh);
+}
+
+async function toggleDeviceMenu() {
+  if (!deviceMenu.hidden) {
+    hideDeviceMenu();
     return;
   }
-  for (const d of devices) {
-    const item = document.createElement("button");
-    item.className = "device";
-    if (d.id === openDeviceId) item.classList.add("active");
-    item.textContent = d.label;
-    item.title = `${d.vendor_id.toString(16)}:${d.product_id.toString(16)} · ${d.id}`;
-    item.addEventListener("click", () => openDevice(d));
-    deviceListEl.appendChild(item);
-  }
+  // Refresh before opening so the user always sees current state — picks up
+  // a freshly-plugged device without making them hunt for a refresh button.
+  await refreshDevices();
+  renderDeviceMenu();
+  deviceMenu.hidden = false;
+  deviceChip.classList.add("is-open");
+}
+
+function hideDeviceMenu() {
+  deviceMenu.hidden = true;
+  deviceChip.classList.remove("is-open");
 }
 
 async function openDevice(d) {
@@ -86,7 +167,8 @@ async function openDevice(d) {
   openDeviceId = d.id;
   cwd = "";
   emptyEl.hidden = true;
-  await Promise.all([refreshList(), refreshStorage(), refreshDevices()]);
+  updateDeviceChip();
+  await Promise.all([refreshList(), refreshStorage()]);
 }
 
 // ---------------------------------------------------------------------------
@@ -127,7 +209,7 @@ function renderList() {
     emptyEl.hidden = false;
   } else {
     emptyEl.hidden = entries.length > 0 || !!openDeviceId;
-    if (!openDeviceId) emptyEl.textContent = "No device selected.";
+    if (!openDeviceId) emptyEl.textContent = "Connect an MTP device to begin.";
   }
 
   listEl.hidden = viewMode !== "list";
@@ -352,10 +434,19 @@ function hideContextMenu() {
 }
 
 document.addEventListener("mousedown", (ev) => {
-  if (contextMenu.hidden) return;
-  if (!contextMenu.contains(ev.target)) hideContextMenu();
+  if (!contextMenu.hidden && !contextMenu.contains(ev.target)) hideContextMenu();
+  if (
+    !deviceMenu.hidden
+    && !deviceMenu.contains(ev.target)
+    && !deviceChip.contains(ev.target)
+  ) {
+    hideDeviceMenu();
+  }
 });
-window.addEventListener("blur", hideContextMenu);
+window.addEventListener("blur", () => {
+  hideContextMenu();
+  hideDeviceMenu();
+});
 document.addEventListener("scroll", hideContextMenu, true);
 
 // ---------------------------------------------------------------------------
@@ -444,6 +535,7 @@ document.addEventListener("keydown", (ev) => {
     deleteSelected();
   } else if (ev.key === "Escape") {
     hideContextMenu();
+    hideDeviceMenu();
     if (selected.size > 0) {
       selected.clear();
       anchorIndex = -1;
@@ -585,7 +677,10 @@ function humanSize(n) {
   return `${i === 0 ? n.toFixed(0) : n.toFixed(1)} ${units[i]}`;
 }
 
-refreshDevicesBtn.addEventListener("click", refreshDevices);
+deviceChip.addEventListener("click", toggleDeviceMenu);
+// Re-enumerate when the window regains focus so hot-plugged devices show up
+// without the user having to open the chip menu first. Cheap call.
+window.addEventListener("focus", () => { refreshDevices(); });
 
 viewListBtn.addEventListener("click", () => setViewMode("list"));
 viewGridBtn.addEventListener("click", () => setViewMode("grid"));
@@ -601,4 +696,4 @@ function setViewMode(mode) {
 // ---------------------------------------------------------------------------
 // Boot
 
-refreshDevices();
+refreshDevices({ autoOpen: true });

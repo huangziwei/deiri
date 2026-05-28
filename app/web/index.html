@@ -7,40 +7,38 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <div id="app">
-      <aside id="sidebar">
-        <h2>Devices</h2>
-        <div id="device-list"></div>
-        <button id="refresh-devices">Refresh</button>
-      </aside>
-      <main>
-        <header>
-          <button id="up" title="Up one folder">↑</button>
-          <nav id="breadcrumb"></nav>
-          <div id="view-toggle" role="group">
-            <button id="view-list" class="active" title="List view">☰</button>
-            <button id="view-grid" title="Grid view">▦</button>
-          </div>
-          <div id="storage"></div>
-        </header>
-        <div id="list-container">
-          <table id="list">
-            <thead>
-              <tr>
-                <th data-sort="name">Name</th>
-                <th data-sort="size">Size</th>
-                <th data-sort="modified">Date Modified</th>
-              </tr>
-            </thead>
-            <tbody id="list-body"></tbody>
-          </table>
-          <div id="grid" hidden></div>
-          <div id="empty">No device selected.</div>
+    <main id="app">
+      <header>
+        <button id="device-chip" type="button" title="Switch device">
+          <span id="device-chip-label">No device</span>
+          <span id="device-chip-chevron" aria-hidden="true">▾</span>
+        </button>
+        <button id="up" title="Up one folder">↑</button>
+        <nav id="breadcrumb"></nav>
+        <div id="view-toggle" role="group">
+          <button id="view-list" class="active" title="List view">☰</button>
+          <button id="view-grid" title="Grid view">▦</button>
         </div>
-        <div id="dropzone-overlay" hidden>Drop to upload</div>
-        <ul id="context-menu" hidden></ul>
-      </main>
-    </div>
+        <div id="storage"></div>
+      </header>
+      <div id="list-container">
+        <table id="list">
+          <thead>
+            <tr>
+              <th data-sort="name">Name</th>
+              <th data-sort="size">Size</th>
+              <th data-sort="modified">Date Modified</th>
+            </tr>
+          </thead>
+          <tbody id="list-body"></tbody>
+        </table>
+        <div id="grid" hidden></div>
+        <div id="empty">No device selected.</div>
+      </div>
+      <div id="dropzone-overlay" hidden>Drop to upload</div>
+      <ul id="context-menu" hidden></ul>
+      <div id="device-menu" hidden role="menu"></div>
+    </main>
     <script src="api.js"></script>
     <script src="main.js"></script>
   </body>
