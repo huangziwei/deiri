@@ -445,15 +445,24 @@ async function refreshStorage() {
 // ---------------------------------------------------------------------------
 // Drag-in (Finder → app)
 
+// Track in-app mouse drags so we don't mistake them (or the Swift drag-out
+// session) for an external Finder→app drop. Without this, any mousedown
+// inside the window — row drag-out, marquee gestures, even click+drag on
+// empty space — pops the import overlay.
+let internalDragInProgress = false;
+document.addEventListener("mousedown", () => { internalDragInProgress = true; });
+document.addEventListener("mouseup", () => { internalDragInProgress = false; });
+window.addEventListener("blur", () => { internalDragInProgress = false; });
+
 window.api.onDragDrop(async (event) => {
   const payload = event.payload;
   if (payload.type === "enter" || payload.type === "over") {
-    if (openDeviceId) dropzone.hidden = false;
+    if (openDeviceId && !internalDragInProgress) dropzone.hidden = false;
   } else if (payload.type === "leave") {
     dropzone.hidden = true;
   } else if (payload.type === "drop") {
     dropzone.hidden = true;
-    if (!openDeviceId) return;
+    if (!openDeviceId || internalDragInProgress) return;
     try {
       await window.api.invoke("upload_files", {
         args: { sources: payload.paths, dest_dir: cwd },

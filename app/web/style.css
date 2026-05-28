@@ -6,6 +6,8 @@ body {
   font: 13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   background: #fff;
   color: #222;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 #app {
