@@ -119,6 +119,10 @@ header {
   gap: 12px;
   padding: 12px;
 }
+/* The id selector above wins over the UA `[hidden] { display: none }` rule
+   (specificity 0,1,0 vs 0,0,1), so without this `hidden` is ignored and the
+   grid stays visible underneath the list when switching back to list view. */
+#grid[hidden] { display: none; }
 .tile {
   display: flex;
   flex-direction: column;
