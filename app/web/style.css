@@ -140,7 +140,7 @@ tbody tr.selected td { background: #d0e3ff; }
 
 /* Context menu --------------------------------------------------------- */
 #context-menu {
-  position: absolute;
+  position: fixed;
   list-style: none;
   margin: 0;
   padding: 4px 0;
