@@ -11,14 +11,15 @@ const deviceChip = $("device-chip");
 const deviceChipLabel = $("device-chip-label");
 const deviceMenu = $("device-menu");
 const breadcrumbEl = $("breadcrumb");
-const storageEl = $("storage");
+const statusEl = $("status");
 const listEl = $("list");
 const listBody = $("list-body");
 const gridEl = $("grid");
 const emptyEl = $("empty");
 const dropzone = $("dropzone-overlay");
 const contextMenu = $("context-menu");
-const upBtn = $("up");
+const navBackBtn = $("nav-back");
+const navForwardBtn = $("nav-forward");
 const viewListBtn = $("view-list");
 const viewGridBtn = $("view-grid");
 
@@ -31,6 +32,17 @@ let entries = [];
 let sortKey = "name";
 let sortDir = "asc";
 let viewMode = "list"; // "list" or "grid"
+
+// Finder-style back/forward navigation. `navHistory` is the stack of visited
+// cwd values; `navIndex` points at the current one. New navigation truncates
+// any forward entries and pushes; the arrows just move the index. Seeded with
+// [""] when a device opens, emptied when it closes (see openDevice / clearOpenDevice).
+let navHistory = [];
+let navIndex = -1;
+
+// Latest storage readout, folded into the bottom status bar alongside the
+// item/selection count. Kept as a string so updateStatusBar can combine them.
+let storageText = "";
 
 // Bumped on every render so chunked-build pumps can detect that the user
 // switched view mode or folder and bail mid-stream. Thumbnails themselves
@@ -192,10 +204,51 @@ async function openDevice(d) {
   }
   openDeviceId = d.id;
   cwd = "";
+  navHistory = [""]; // fresh history rooted at the device's top level
+  navIndex = 0;
   emptyEl.hidden = true;
   invalidateFolderSizes(); // new session — old handles (and their sizes) are meaningless
   updateDeviceChip();
+  updateNavButtons();
   await Promise.all([refreshList(), refreshStorage()]);
+}
+
+// ---------------------------------------------------------------------------
+// Navigation (Finder-style back/forward over a visited-folder history)
+
+// Go to `path`, recording it in history. Used by every user-initiated move
+// (double-click into a folder, path-bar click). Truncates any forward entries
+// first, so navigating after going back drops the old forward branch — exactly
+// like a browser / Finder.
+function navigateTo(path) {
+  if (navIndex >= 0 && navHistory[navIndex] === path) return; // already here
+  navHistory = navHistory.slice(0, navIndex + 1);
+  navHistory.push(path);
+  navIndex = navHistory.length - 1;
+  cwd = path;
+  updateNavButtons();
+  refreshList();
+}
+
+function goBack() {
+  if (navIndex <= 0) return;
+  navIndex--;
+  cwd = navHistory[navIndex];
+  updateNavButtons();
+  refreshList();
+}
+
+function goForward() {
+  if (navIndex >= navHistory.length - 1) return;
+  navIndex++;
+  cwd = navHistory[navIndex];
+  updateNavButtons();
+  refreshList();
+}
+
+function updateNavButtons() {
+  navBackBtn.disabled = navIndex <= 0;
+  navForwardBtn.disabled = navIndex >= navHistory.length - 1;
 }
 
 // Tear down all open-device state — the inverse of openDevice(). Called when
@@ -207,6 +260,9 @@ async function openDevice(d) {
 async function clearOpenDevice() {
   openDeviceId = null;
   cwd = "";
+  navHistory = [];
+  navIndex = -1;
+  storageText = "";
   invalidateFolderSizes(); // session gone — drop its cached sizes
   try {
     await window.api.invoke("close_device");
@@ -214,9 +270,9 @@ async function clearOpenDevice() {
     console.error("close_device failed", err);
   }
   updateDeviceChip();
+  updateNavButtons();
   await refreshList();
-  renderBreadcrumb(); // reset to just "Device" (refreshList skips it when no device)
-  storageEl.textContent = "";
+  renderBreadcrumb(); // clear the path bar (refreshList skips it when no device)
 }
 
 // ---------------------------------------------------------------------------
@@ -286,6 +342,8 @@ function renderList() {
   gridEl.hidden = viewMode !== "grid";
   if (viewMode === "list") renderListView();
   else renderGridView();
+
+  updateStatusBar(); // item count changed (and selection was cleared on nav)
 }
 
 function renderListView() {
@@ -312,10 +370,7 @@ function renderListView() {
 
     tr.addEventListener("click", (ev) => onRowClick(idx, ev));
     tr.addEventListener("dblclick", () => {
-      if (e.is_dir) {
-        cwd = cwd ? `${cwd}/${e.name}` : e.name;
-        refreshList();
-      }
+      if (e.is_dir) navigateTo(cwd ? `${cwd}/${e.name}` : e.name);
     });
     tr.addEventListener("contextmenu", (ev) => onRowContextMenu(idx, ev));
 
@@ -383,10 +438,7 @@ function buildTile(e, idx) {
 
   tile.addEventListener("click", (ev) => onRowClick(idx, ev));
   tile.addEventListener("dblclick", () => {
-    if (e.is_dir) {
-      cwd = cwd ? `${cwd}/${e.name}` : e.name;
-      refreshList();
-    }
+    if (e.is_dir) navigateTo(cwd ? `${cwd}/${e.name}` : e.name);
   });
   tile.addEventListener("contextmenu", (ev) => onRowContextMenu(idx, ev));
   if (!e.is_dir) attachDragOut(tile, e);
@@ -426,6 +478,7 @@ function updateSelectionDOM() {
   nodes.forEach((n) => {
     n.classList.toggle("selected", selected.has(pathFor(n.dataset.name)));
   });
+  updateStatusBar(); // selection count drives the status bar
 }
 
 // ---------------------------------------------------------------------------
@@ -721,6 +774,12 @@ document.addEventListener("keydown", (ev) => {
     for (const e of entries) selected.add(pathFor(e.name));
     anchorIndex = entries.length - 1;
     updateSelectionDOM();
+  } else if ((ev.metaKey || ev.ctrlKey) && ev.key === "[") {
+    ev.preventDefault(); // Finder's Back shortcut
+    goBack();
+  } else if ((ev.metaKey || ev.ctrlKey) && ev.key === "]") {
+    ev.preventDefault(); // Finder's Forward shortcut
+    goForward();
   } else if (ev.key === "Backspace" || ev.key === "Delete") {
     if (selected.size === 0) return;
     ev.preventDefault();
@@ -759,46 +818,40 @@ function attachDragOut(tr, e) {
   });
 }
 
+// The bottom path bar. Each ancestor is a clickable crumb (navigates, so it
+// joins history); the current folder is shown bold and inert. Empty when no
+// device is open.
 function renderBreadcrumb() {
   breadcrumbEl.innerHTML = "";
+  if (!openDeviceId) return;
 
-  const rootLink = document.createElement("a");
-  rootLink.textContent = "Device";
-  rootLink.addEventListener("click", () => {
-    cwd = "";
-    refreshList();
+  const crumbs = [{ label: "Device", path: "" }];
+  if (cwd) {
+    const acc = [];
+    for (const seg of cwd.split("/")) {
+      acc.push(seg);
+      crumbs.push({ label: seg, path: acc.join("/") });
+    }
+  }
+
+  crumbs.forEach((c, i) => {
+    if (i > 0) {
+      const sep = document.createElement("span");
+      sep.className = "crumb-sep";
+      sep.textContent = "›";
+      breadcrumbEl.appendChild(sep);
+    }
+    const isCurrent = i === crumbs.length - 1;
+    const el = document.createElement(isCurrent ? "span" : "a");
+    el.textContent = c.label;
+    el.className = isCurrent ? "crumb-current" : "crumb-link";
+    if (!isCurrent) el.addEventListener("click", () => navigateTo(c.path));
+    breadcrumbEl.appendChild(el);
   });
-  breadcrumbEl.appendChild(rootLink);
-
-  if (!cwd) {
-    upBtn.disabled = true;
-    return;
-  }
-
-  const segments = cwd.split("/");
-  const acc = [];
-  for (const seg of segments) {
-    acc.push(seg);
-    const sep = document.createElement("span");
-    sep.textContent = " / ";
-    breadcrumbEl.appendChild(sep);
-    const a = document.createElement("a");
-    a.textContent = seg;
-    const path = acc.join("/");
-    a.addEventListener("click", () => {
-      cwd = path;
-      refreshList();
-    });
-    breadcrumbEl.appendChild(a);
-  }
-  upBtn.disabled = false;
 }
 
-upBtn.addEventListener("click", () => {
-  if (!cwd) return;
-  cwd = cwd.split("/").slice(0, -1).join("/");
-  refreshList();
-});
+navBackBtn.addEventListener("click", goBack);
+navForwardBtn.addEventListener("click", goForward);
 
 document.querySelectorAll("thead th").forEach((th) => {
   th.addEventListener("click", () => {
@@ -819,11 +872,25 @@ document.querySelectorAll("thead th").forEach((th) => {
 
 async function refreshStorage() {
   const info = await window.api.invoke("storage_info");
-  if (!info) {
-    storageEl.textContent = "";
+  storageText = info
+    ? `${humanSize(info.free_bytes)} free / ${humanSize(info.total_bytes)}`
+    : "";
+  updateStatusBar();
+}
+
+// Bottom status bar: item/selection count plus storage, mirroring Finder's
+// "N items, X available". Empty when no device is open.
+function updateStatusBar() {
+  if (!openDeviceId) {
+    statusEl.textContent = "";
     return;
   }
-  storageEl.textContent = `${humanSize(info.free_bytes)} free / ${humanSize(info.total_bytes)}`;
+  const total = entries.length;
+  const sel = selected.size;
+  const count = sel > 0
+    ? `${sel} of ${total} selected`
+    : `${total} ${total === 1 ? "item" : "items"}`;
+  statusEl.textContent = storageText ? `${count}  ·  ${storageText}` : count;
 }
 
 // ---------------------------------------------------------------------------
@@ -909,4 +976,5 @@ function setViewMode(mode) {
 // ---------------------------------------------------------------------------
 // Boot
 
+updateNavButtons(); // disabled until a device opens and seeds history
 refreshDevices({ autoOpen: true });

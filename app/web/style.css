@@ -116,30 +116,56 @@ header {
   border-bottom: 1px solid #e5e5e8;
   background: #fafafb;
 }
-#up {
+/* Back/forward navigation — segmented pair, like the view toggle. */
+#nav-buttons { display: flex; }
+#nav-buttons button {
   border: 1px solid #d0d0d4;
   background: #fff;
-  border-radius: 4px;
-  padding: 2px 8px;
+  padding: 1px 10px 3px;
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  color: inherit;
   cursor: pointer;
 }
-#up:disabled { opacity: 0.4; cursor: default; }
-#breadcrumb {
-  flex: 1;
-  min-width: 0;
+#nav-buttons button:first-child { border-radius: 4px 0 0 4px; }
+#nav-buttons button:last-child { border-radius: 0 4px 4px 0; border-left: 0; }
+#nav-buttons button:hover:not(:disabled) { background: #f0f0f4; }
+#nav-buttons button:disabled { opacity: 0.35; cursor: default; }
+
+/* Path bar — the breadcrumb, moved to the bottom above the status bar. */
+#breadcrumb.path-bar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 12px;
+  border-top: 1px solid #e5e5e8;
+  background: #fafafb;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 12px;
+  min-height: 28px;
 }
-#breadcrumb a {
-  cursor: pointer;
-  color: #0066cc;
+.crumb-link { cursor: pointer; color: #0066cc; }
+.crumb-link:hover { text-decoration: underline; }
+.crumb-current { color: #444; font-weight: 500; }
+.crumb-sep { color: #aaa; }
+
+/* Status bar — item/selection count + storage, centered like Finder. */
+#status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 12px;
+  border-top: 1px solid #e5e5e8;
+  background: #fafafb;
+  color: #666;
+  font-size: 12px;
+  min-height: 24px;
 }
-#breadcrumb a:hover { text-decoration: underline; }
-#storage { color: #666; font-size: 12px; }
 
 /* View toggle ------------------------------------------------------------- */
-#view-toggle { display: flex; gap: 2px; }
+#view-toggle { display: flex; gap: 2px; margin-left: auto; }
 #view-toggle button {
   border: 1px solid #d0d0d4;
   background: #fff;
@@ -285,7 +311,12 @@ tbody tr.selected td { background: #d0e3ff; }
 @media (prefers-color-scheme: dark) {
   body { background: #1e1e20; color: #e8e8ea; }
   header { background: #252528; border-bottom-color: #36363a; }
-  #up { background: #2c2c30; border-color: #44444a; color: inherit; }
+  #nav-buttons button { background: #2c2c30; border-color: #44444a; color: inherit; }
+  #nav-buttons button:hover:not(:disabled) { background: #34343a; }
+  #breadcrumb.path-bar, #status-bar { background: #252528; border-top-color: #36363a; }
+  .crumb-current { color: #cdcdd0; }
+  .crumb-sep { color: #666; }
+  #status-bar { color: #999; }
   #device-chip { background: #2c2c30; border-color: #44444a; color: inherit; }
   #device-chip:hover { background: #34343a; }
   #device-chip.is-open { background: #3a3a40; }
@@ -298,7 +329,7 @@ tbody tr.selected td { background: #d0e3ff; }
   th, td { border-bottom-color: #2e2e32; }
   tbody tr:hover td { background: #2a3340; }
   tbody tr.selected td { background: #2c4474; }
-  .cell-size, .cell-modified, #storage { color: #999; }
+  .cell-size, .cell-modified { color: #999; }
   #view-toggle button { background: #2c2c30; border-color: #44444a; color: inherit; }
   #view-toggle button.active { background: #2c4474; }
   .tile:hover { background: #2a3340; }

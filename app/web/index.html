@@ -13,13 +13,14 @@
           <span id="device-chip-label">No device</span>
           <span id="device-chip-chevron" aria-hidden="true">▾</span>
         </button>
-        <button id="up" title="Up one folder">↑</button>
-        <nav id="breadcrumb"></nav>
+        <div id="nav-buttons" role="group">
+          <button id="nav-back" title="Back">‹</button>
+          <button id="nav-forward" title="Forward">›</button>
+        </div>
         <div id="view-toggle" role="group">
           <button id="view-list" class="active" title="List view">☰</button>
           <button id="view-grid" title="Grid view">▦</button>
         </div>
-        <div id="storage"></div>
       </header>
       <div id="list-container">
         <table id="list">
@@ -35,6 +36,8 @@
         <div id="grid" hidden></div>
         <div id="empty">No device selected.</div>
       </div>
+      <nav id="breadcrumb" class="path-bar"></nav>
+      <footer id="status-bar"><span id="status"></span></footer>
       <div id="dropzone-overlay" hidden>Drop to upload</div>
       <ul id="context-menu" hidden></ul>
       <div id="device-menu" hidden role="menu"></div>
