@@ -46,10 +46,14 @@ const selected = new Set();
 let anchorIndex = -1; // for shift-click range; -1 when no anchor
 
 // Recursively-computed folder sizes, keyed by object_id (stable within a
-// session). Value is the literal "calculating" while a dir_size call is in
-// flight, or a byte count once it resolves. Read by the list view's size cell;
-// cleared on every refreshList so a fresh listing recomputes rather than
-// showing a possibly-stale total. See calculateFolderSizes.
+// session). Value is { size, path }: size is the literal "calculating" while a
+// dir_size call is in flight, or a byte count once it resolves; path is the
+// folder's device-relative path, kept so a content change can invalidate just
+// the affected folder and its ancestors by path-ancestry. Read by the list
+// view's size cell. Computed totals survive navigation (that's the whole point)
+// and are dropped only when they could be wrong — see refreshList (in-flight
+// entries), invalidateAncestorsOf / invalidateSubtree (upload/delete), and
+// invalidateFolderSizes (device switch / unplug). See calculateFolderSizes.
 const folderSizeState = new Map();
 
 // Pending folder-size work. Folders are sized one at a time (see pumpSizeQueue)
@@ -189,6 +193,7 @@ async function openDevice(d) {
   openDeviceId = d.id;
   cwd = "";
   emptyEl.hidden = true;
+  invalidateFolderSizes(); // new session — old handles (and their sizes) are meaningless
   updateDeviceChip();
   await Promise.all([refreshList(), refreshStorage()]);
 }
@@ -202,6 +207,7 @@ async function openDevice(d) {
 async function clearOpenDevice() {
   openDeviceId = null;
   cwd = "";
+  invalidateFolderSizes(); // session gone — drop its cached sizes
   try {
     await window.api.invoke("close_device");
   } catch (err) {
@@ -219,7 +225,15 @@ async function clearOpenDevice() {
 async function refreshList() {
   selected.clear();
   anchorIndex = -1;
-  folderSizeState.clear();
+  // Keep already-computed folder sizes across navigation — they're keyed by
+  // object_id, which is stable for the whole session, so a folder's total is
+  // still valid when you return to its listing. Only drop entries that were
+  // mid-calculation, since pumpSizeQueue's pending work is being cancelled
+  // here. Mutations and device changes wipe the cache wholesale via
+  // invalidateFolderSizes() instead.
+  for (const [id, v] of folderSizeState) {
+    if (v.size === "calculating") folderSizeState.delete(id);
+  }
   sizeQueue.length = 0; // drop pending size work for the folder we're leaving
   if (!openDeviceId) {
     entries = [];
@@ -239,8 +253,8 @@ async function refreshList() {
 // among themselves and files among themselves.
 function effectiveSize(e) {
   if (!e.is_dir) return e.size ?? 0;
-  const s = folderSizeState.get(e.object_id);
-  return typeof s === "number" ? s : -1;
+  const v = folderSizeState.get(e.object_id);
+  return v && typeof v.size === "number" ? v.size : -1;
 }
 
 function sortEntries() {
@@ -558,6 +572,10 @@ async function deleteSelected() {
       break;
     }
   }
+  // Targeted invalidation: the removed subtrees (whose handles may be reused)
+  // and the parent chain whose totals shrank. Sibling folders keep their sizes.
+  for (const p of paths) invalidateSubtree(p);
+  invalidateAncestorsOf(cwd);
   await Promise.all([refreshList(), refreshStorage()]);
 }
 
@@ -591,13 +609,44 @@ async function saveSelectedTo() {
 // so: mark every folder "calculating" with a SINGLE render here, then let the
 // queue update one cell at a time as results arrive. Re-rendering the whole
 // table per folder (what we did before) froze the UI on big selections.
+// Throw away ALL computed sizes and pending work. Used only when the whole
+// cache is meaningless: a device switch or unplug (object_id handles don't
+// carry across sessions, and may be reused). Mutations use the targeted
+// invalidators below so an edit to one folder doesn't wipe unrelated totals.
+function invalidateFolderSizes() {
+  folderSizeState.clear();
+  sizeQueue.length = 0;
+}
+
+// Drop cached sizes that a content change at `dirPath` makes stale: `dirPath`
+// itself and every ancestor (their totals include `dirPath`'s subtree).
+// Siblings and unrelated branches keep their sizes. The trailing "/" guard
+// stops "a/Down" from matching "a/Downloads". Used after an upload into a
+// folder, and for the parent chain after a delete.
+function invalidateAncestorsOf(dirPath) {
+  for (const [id, v] of folderSizeState) {
+    if (v.path === dirPath || dirPath.startsWith(v.path + "/")) folderSizeState.delete(id);
+  }
+}
+
+// Drop cached sizes for a removed subtree: the folder at `removedPath` and
+// anything cached beneath it. Those handles are gone and the device may reuse
+// them for new objects, so a leftover entry could otherwise pin a dead size to
+// a future folder. Used after a delete, per removed path.
+function invalidateSubtree(removedPath) {
+  for (const [id, v] of folderSizeState) {
+    if (v.path === removedPath || v.path.startsWith(removedPath + "/")) folderSizeState.delete(id);
+  }
+}
+
 function calculateFolderSizes(folders) {
   let queued = 0;
   for (const entry of folders) {
-    const s = folderSizeState.get(entry.object_id);
-    if (s === "calculating" || typeof s === "number") continue; // in flight or already known
-    folderSizeState.set(entry.object_id, "calculating");
-    sizeQueue.push({ entry, cwd });
+    const v = folderSizeState.get(entry.object_id);
+    if (v) continue; // in flight or already known
+    const path = pathFor(entry.name);
+    folderSizeState.set(entry.object_id, { size: "calculating", path });
+    sizeQueue.push({ entry, cwd, path });
     queued++;
   }
   if (queued > 0) renderList();
@@ -614,14 +663,14 @@ async function pumpSizeQueue() {
   sizeQueueRunning = true;
   let alerted = false;
   while (sizeQueue.length > 0) {
-    const { entry, cwd: startedCwd } = sizeQueue.shift();
+    const { entry, cwd: startedCwd, path } = sizeQueue.shift();
     if (cwd !== startedCwd) continue; // navigated away; state already cleared
     try {
       const bytes = await window.api.invoke("dir_size", {
         args: { object_id: entry.object_id },
       });
       if (cwd !== startedCwd) continue; // navigated away while this one ran
-      folderSizeState.set(entry.object_id, bytes);
+      folderSizeState.set(entry.object_id, { size: bytes, path });
     } catch (err) {
       console.error("dir_size failed", entry.name, err);
       if (cwd === startedCwd) folderSizeState.delete(entry.object_id);
@@ -794,6 +843,7 @@ window.api.onDragDrop(async (event) => {
       console.error("upload failed", err);
       alert(`Upload failed: ${err}`);
     }
+    invalidateAncestorsOf(cwd); // new files grew this folder and its ancestors
     await Promise.all([refreshList(), refreshStorage()]);
   }
 });
@@ -821,9 +871,10 @@ function formatModified(epochSecs) {
 // Size-column text for a folder row. Folders have no size until the user asks
 // for one via "Calculate Size" (see calculateFolderSizes); until then, "—".
 function folderSizeLabel(e) {
-  const s = folderSizeState.get(e.object_id);
-  if (s === "calculating") return "Calculating…";
-  if (typeof s === "number") return humanSize(s);
+  const v = folderSizeState.get(e.object_id);
+  if (!v) return "—";
+  if (v.size === "calculating") return "Calculating…";
+  if (typeof v.size === "number") return humanSize(v.size);
   return "—";
 }
 
