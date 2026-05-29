@@ -654,10 +654,12 @@ function calculateFolderSizes(folders) {
 }
 
 // Drain sizeQueue one folder at a time. Sequential on purpose: the backend
-// serializes MTP access behind a single lock anyway, so concurrent dir_size
+// serializes MTP access behind a single lock anyway, so concurrent dir_sizes
 // calls wouldn't finish faster — they'd just tie up worker threads and starve
 // other operations. One at a time keeps the device pipe busy and lets results
 // stream in, and leaves a gap between folders where a navigation can interleave.
+// Each call also returns the queried folder's whole subtree, so sizing a parent
+// pre-fills its children — stepping in then shows their sizes immediately.
 async function pumpSizeQueue() {
   if (sizeQueueRunning) return;
   sizeQueueRunning = true;
@@ -665,14 +667,24 @@ async function pumpSizeQueue() {
   while (sizeQueue.length > 0) {
     const { entry, cwd: startedCwd, path } = sizeQueue.shift();
     if (cwd !== startedCwd) continue; // navigated away; state already cleared
+    // Already resolved as a side effect of an earlier folder's subtree walk
+    // (its ancestor was sized first) — don't re-walk it.
+    const done = folderSizeState.get(entry.object_id);
+    if (done && typeof done.size === "number") { updateFolderSizeCell(entry); continue; }
     try {
-      const bytes = await window.api.invoke("dir_size", {
+      // One walk returns the queried folder (rel_path "") and every folder
+      // beneath it, so we cache the whole subtree — stepping into it later
+      // shows child sizes with no recompute.
+      const subtree = await window.api.invoke("dir_sizes", {
         args: { object_id: entry.object_id },
       });
       if (cwd !== startedCwd) continue; // navigated away while this one ran
-      folderSizeState.set(entry.object_id, { size: bytes, path });
+      for (const f of subtree) {
+        const fullPath = f.rel_path ? `${path}/${f.rel_path}` : path;
+        folderSizeState.set(f.object_id, { size: f.size, path: fullPath });
+      }
     } catch (err) {
-      console.error("dir_size failed", entry.name, err);
+      console.error("dir_sizes failed", entry.name, err);
       if (cwd === startedCwd) folderSizeState.delete(entry.object_id);
       if (!alerted) {
         alerted = true; // one alert per run, not one per folder

@@ -36,6 +36,21 @@ pub struct StorageInfo {
     pub total_bytes: u64,
 }
 
+/// One folder's recursive size, as returned by [`Fs::dir_sizes_by_id`]. The
+/// call computes these for the queried folder *and every folder beneath it* in
+/// a single walk, so the UI can cache the whole subtree at once.
+#[derive(Debug, Clone, Serialize)]
+pub struct FolderSize {
+    /// Raw PTP object handle of this folder (same id space as [`Entry::object_id`]).
+    pub object_id: u32,
+    /// Path of this folder relative to the queried folder: `""` is the queried
+    /// folder itself, `"a/b"` a descendant. The caller knows the queried
+    /// folder's absolute path and prepends it to key its cache.
+    pub rel_path: String,
+    /// Total bytes of all files in this folder's subtree.
+    pub size: u64,
+}
+
 pub trait Fs: Send + Sync {
     fn list(&self, dir: &TPath) -> Result<Vec<Entry>>;
     fn exists(&self, path: &TPath) -> Result<bool>;
@@ -52,7 +67,11 @@ pub trait Fs: Send + Sync {
     /// Walks the whole subtree with one metadata round-trip per object, so it's
     /// meant as an explicit, on-demand action (a "Calculate Size" menu item),
     /// not something to run during a normal listing.
-    fn dir_size_by_id(&self, object_id: u32) -> Result<u64>;
+    ///
+    /// Returns a size for the queried folder *and every folder beneath it* (the
+    /// walk visits them all anyway), so the caller can populate its whole
+    /// subtree cache from one call instead of re-walking when the user steps in.
+    fn dir_sizes_by_id(&self, object_id: u32) -> Result<Vec<FolderSize>>;
 
     /// Download `path` to a local file. Used by the drag-out promise callback.
     fn download_to(&self, path: &TPath, dest: &Path) -> Result<()>;

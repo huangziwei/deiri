@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use mtp_core::{DeviceDescriptor, Entry, Fs, MtpFs, StorageInfo, TPath};
+use mtp_core::{DeviceDescriptor, Entry, FolderSize, Fs, MtpFs, StorageInfo, TPath};
 use serde::Deserialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -72,12 +72,13 @@ pub struct DirSizeArgs {
     pub object_id: u32,
 }
 
-/// Recursive byte total of a folder (by object handle), for the "Calculate
-/// Size" menu action. Potentially slow — one round-trip per object in the
-/// subtree — and serialized behind the session lock like every other op.
+/// Recursive sizes of a folder and every folder beneath it (by object handle),
+/// for the "Calculate Size" menu action. One walk returns the whole subtree's
+/// per-folder totals so the UI can cache them all. Potentially slow — one
+/// round-trip per object — and serialized behind the session lock.
 #[tauri::command]
-pub async fn dir_size(args: DirSizeArgs, state: State<'_, AppState>) -> Result<u64, String> {
-    state.with_fs(|fs| fs.dir_size_by_id(args.object_id)).map_err(err)
+pub async fn dir_sizes(args: DirSizeArgs, state: State<'_, AppState>) -> Result<Vec<FolderSize>, String> {
+    state.with_fs(|fs| fs.dir_sizes_by_id(args.object_id)).map_err(err)
 }
 
 #[tauri::command]

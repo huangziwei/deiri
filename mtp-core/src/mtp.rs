@@ -11,6 +11,7 @@
 //! (which chain walk + list + upload across multiple round-trips) so two UI
 //! events can't interleave on the same session.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 use std::sync::Mutex;
@@ -22,7 +23,7 @@ use futures::executor::block_on;
 use mtp_rs::mtp::{MtpDevice, NewObjectInfo, Storage};
 use mtp_rs::ptp::{unpack_string, DateTime, ObjectHandle, ObjectPropertyCode, PtpSession};
 
-use crate::fs::{Entry, Fs, StorageInfo};
+use crate::fs::{Entry, FolderSize, Fs, StorageInfo};
 use crate::path::TPath;
 
 /// Upload chunk size. 256 KiB balances allocator churn against syscall
@@ -184,23 +185,96 @@ impl Fs for MtpFs {
         })
     }
 
-    fn dir_size_by_id(&self, object_id: u32) -> Result<u64> {
+    fn dir_sizes_by_id(&self, root: u32) -> Result<Vec<FolderSize>> {
         let _g = self.op_lock.lock().expect("op_lock poisoned");
         block_on(async {
-            // Manual traversal (list each folder, recurse into subfolders)
-            // rather than the "native recursive" variant: GetObjectHandles with
-            // a specific parent returns only immediate children on most devices,
-            // so the native path isn't actually recursive for a subfolder. The
-            // manual walk is correct everywhere, at one listing per subfolder.
-            //
-            // We start from the handle directly (no path resolve) — sizing N
-            // folders must not re-walk the parent listing from the root N times.
-            let objects = self
-                .storage
-                .list_objects_recursive_manual(Some(ObjectHandle(object_id)))
-                .await
-                .map_err(map_err)?;
-            Ok(objects.iter().filter(|o| o.is_file()).map(|o| o.size).sum())
+            // Our own manual walk (list each folder, recurse) — not the library's
+            // `list_objects_recursive_manual`, which returns a flat list whose
+            // per-object `parent`/path we'd have to trust. We instead record the
+            // parent *from the traversal* (always correct) and the name, so we can
+            // build each folder's recursive total and its path relative to `root`.
+            // GetObjectHandles with a specific parent returns only immediate
+            // children, which is exactly what we want per level. We start at the
+            // handle directly (no path resolve) so sizing doesn't re-walk the
+            // parent listing.
+
+            // (handle, parent_handle, name, is_file, size) with parent KNOWN
+            // from the walk rather than from the device's ObjectInfo.
+            let mut nodes: Vec<(u32, u32, String, bool, u64)> = Vec::new();
+            let mut stack: Vec<u32> = vec![root];
+            while let Some(parent) = stack.pop() {
+                let children = self
+                    .storage
+                    .list_objects(Some(ObjectHandle(parent)))
+                    .await
+                    .map_err(map_err)?;
+                for c in children {
+                    nodes.push((c.handle.0, parent, c.filename.clone(), c.is_file(), c.size));
+                    if c.is_folder() {
+                        stack.push(c.handle.0);
+                    }
+                }
+            }
+
+            let mut parent_of: HashMap<u32, u32> = HashMap::new();
+            let mut name_of: HashMap<u32, String> = HashMap::new();
+            // Every folder gets an entry (so empty folders report 0), and `root`
+            // itself is always present even when the subtree has no files.
+            let mut totals: HashMap<u32, u64> = HashMap::new();
+            totals.insert(root, 0);
+            for (h, p, name, is_file, _size) in &nodes {
+                parent_of.insert(*h, *p);
+                name_of.insert(*h, name.clone());
+                if !is_file {
+                    totals.entry(*h).or_insert(0);
+                }
+            }
+
+            // Each file's size flows into its parent folder and every ancestor up
+            // to and including `root`.
+            for (_h, p, _name, is_file, size) in &nodes {
+                if *is_file {
+                    let mut cur = *p;
+                    loop {
+                        *totals.entry(cur).or_insert(0) += *size;
+                        if cur == root {
+                            break;
+                        }
+                        match parent_of.get(&cur) {
+                            Some(&pp) => cur = pp,
+                            None => break, // defensive: every node descends from root
+                        }
+                    }
+                }
+            }
+
+            let out = totals
+                .into_iter()
+                .map(|(handle, size)| {
+                    let rel_path = if handle == root {
+                        String::new()
+                    } else {
+                        // Walk up to (but not including) root, collecting names.
+                        let mut parts: Vec<&str> = Vec::new();
+                        let mut cur = handle;
+                        loop {
+                            match name_of.get(&cur) {
+                                Some(n) => parts.push(n),
+                                None => break,
+                            }
+                            match parent_of.get(&cur) {
+                                Some(&p) if p == root => break,
+                                Some(&p) => cur = p,
+                                None => break,
+                            }
+                        }
+                        parts.reverse();
+                        parts.join("/")
+                    };
+                    FolderSize { object_id: handle, rel_path, size }
+                })
+                .collect();
+            Ok(out)
         })
     }
 

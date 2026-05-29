@@ -12,6 +12,6 @@ mod path;
 pub mod serde_u64_str;
 
 pub use device::{DeviceDescriptor, list_devices};
-pub use fs::{Entry, Fs, StorageInfo};
+pub use fs::{Entry, FolderSize, Fs, StorageInfo};
 pub use mtp::MtpFs;
 pub use path::TPath;
