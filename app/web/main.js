@@ -224,13 +224,25 @@ async function refreshList() {
   renderBreadcrumb();
 }
 
+// Size used for the "size" sort. Files use their real size. Folders have none
+// until "Calculate Size" computes one, so a calculated folder sorts by its
+// total and an uncalculated folder sorts as -1 — clustered together, and
+// distinct from a calculated empty (0-byte) folder. Folders stay grouped above
+// files (see the is_dir check in sortEntries), so this only orders folders
+// among themselves and files among themselves.
+function effectiveSize(e) {
+  if (!e.is_dir) return e.size ?? 0;
+  const s = folderSizeState.get(e.object_id);
+  return typeof s === "number" ? s : -1;
+}
+
 function sortEntries() {
   const dir = sortDir === "asc" ? 1 : -1;
   entries.sort((a, b) => {
     if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
     switch (sortKey) {
       case "name":     return a.name.localeCompare(b.name) * dir;
-      case "size":     return ((a.size ?? 0) - (b.size ?? 0)) * dir;
+      case "size":     return (effectiveSize(a) - effectiveSize(b)) * dir;
       case "modified": return ((a.modified_at ?? 0) - (b.modified_at ?? 0)) * dir;
       default:         return 0;
     }

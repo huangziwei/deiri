@@ -22,7 +22,7 @@ fn err(e: anyhow::Error) -> String {
 }
 
 #[tauri::command]
-pub fn list_devices() -> Result<Vec<DeviceDescriptor>, String> {
+pub async fn list_devices() -> Result<Vec<DeviceDescriptor>, String> {
     mtp_core::list_devices().map_err(err)
 }
 
@@ -36,10 +36,10 @@ pub struct OpenDeviceArgs {
 }
 
 #[tauri::command]
-pub fn open_device(
+pub async fn open_device(
     app: AppHandle,
     args: OpenDeviceArgs,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
     let fs = MtpFs::open(args.location_id).map_err(err)?;
     // Wipe any cached thumbs from a prior session with this device — PTP
@@ -56,14 +56,14 @@ pub fn open_device(
 }
 
 #[tauri::command]
-pub fn close_device(state: State<AppState>) -> Result<(), String> {
+pub async fn close_device(state: State<'_, AppState>) -> Result<(), String> {
     let mut guard = state.current.lock().map_err(|_| "session lock poisoned".to_string())?;
     *guard = None;
     Ok(())
 }
 
 #[tauri::command]
-pub fn list_dir(path: String, state: State<AppState>) -> Result<Vec<Entry>, String> {
+pub async fn list_dir(path: String, state: State<'_, AppState>) -> Result<Vec<Entry>, String> {
     state.with_fs(|fs| fs.list(&TPath::parse(&path))).map_err(err)
 }
 
@@ -71,12 +71,12 @@ pub fn list_dir(path: String, state: State<AppState>) -> Result<Vec<Entry>, Stri
 /// Potentially slow (one round-trip per object); serialized behind the session
 /// lock like every other op, so it blocks concurrent MTP calls while it runs.
 #[tauri::command]
-pub fn dir_size(path: String, state: State<AppState>) -> Result<u64, String> {
+pub async fn dir_size(path: String, state: State<'_, AppState>) -> Result<u64, String> {
     state.with_fs(|fs| fs.dir_size(&TPath::parse(&path))).map_err(err)
 }
 
 #[tauri::command]
-pub fn storage_info(state: State<AppState>) -> Result<Option<StorageInfo>, String> {
+pub async fn storage_info(state: State<'_, AppState>) -> Result<Option<StorageInfo>, String> {
     state.with_fs(|fs| Ok(fs.storage_info())).map_err(err)
 }
 
@@ -89,7 +89,7 @@ pub struct UploadFilesArgs {
 }
 
 #[tauri::command]
-pub fn upload_files(args: UploadFilesArgs, state: State<AppState>) -> Result<(), String> {
+pub async fn upload_files(args: UploadFilesArgs, state: State<'_, AppState>) -> Result<(), String> {
     let dest_dir = TPath::parse(&args.dest_dir);
     state
         .with_fs(|fs| {
@@ -115,7 +115,7 @@ pub struct DownloadArgs {
 }
 
 #[tauri::command]
-pub fn download_to(args: DownloadArgs, state: State<AppState>) -> Result<(), String> {
+pub async fn download_to(args: DownloadArgs, state: State<'_, AppState>) -> Result<(), String> {
     let src = TPath::parse(&args.source);
     state.with_fs(|fs| fs.download_to(&src, &args.dest)).map_err(err)
 }
@@ -127,7 +127,7 @@ pub struct DeleteArgs {
 }
 
 #[tauri::command]
-pub fn delete(args: DeleteArgs, state: State<AppState>) -> Result<bool, String> {
+pub async fn delete(args: DeleteArgs, state: State<'_, AppState>) -> Result<bool, String> {
     let p = TPath::parse(&args.path);
     state
         .with_fs(|fs| {
@@ -141,7 +141,7 @@ pub fn delete(args: DeleteArgs, state: State<AppState>) -> Result<bool, String> 
 }
 
 #[tauri::command]
-pub fn create_dir(path: String, state: State<AppState>) -> Result<(), String> {
+pub async fn create_dir(path: String, state: State<'_, AppState>) -> Result<(), String> {
     let p = TPath::parse(&path);
     state.with_fs(|fs| fs.create_dir(&p)).map_err(err)
 }
