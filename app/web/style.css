@@ -44,19 +44,29 @@ body {
   font-weight: 500;
 }
 #device-chip.no-device #device-chip-label { font-weight: 400; color: #888; }
-#device-chip-chevron { font-size: 9px; color: #888; }
-#device-chip.solo #device-chip-chevron { display: none; }
+/* Chevron is its own click target (opens the device switcher), so give it a
+   little padding and a hover cue distinct from the chip's go-to-root click. */
+#device-chip-chevron {
+  font-size: 9px;
+  color: #888;
+  padding: 2px 2px 2px 4px;
+  margin: -2px -4px -2px 0;
+  border-radius: 3px;
+}
+#device-chip-chevron:hover { background: rgba(0, 0, 0, 0.08); color: inherit; }
 
 #device-menu {
   position: absolute;
-  top: 38px;
+  /* The chip now lives in the bottom path bar, so the menu opens upward,
+     clearing the path bar (~30px) + status bar (~24px). */
+  bottom: 56px;
   left: 12px;
   min-width: 220px;
   max-width: 320px;
   background: #ffffff;
   border: 1px solid #c8c8cc;
   border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.18);
   padding: 4px;
   z-index: 10;
   display: flex;
@@ -133,18 +143,25 @@ header {
 #nav-buttons button:hover:not(:disabled) { background: #f0f0f4; }
 #nav-buttons button:disabled { opacity: 0.35; cursor: default; }
 
-/* Path bar — the breadcrumb, moved to the bottom above the status bar. */
-#breadcrumb.path-bar {
+/* Path bar — device chip (the path root) + breadcrumb, above the status bar. */
+.path-bar {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   padding: 4px 12px;
   border-top: 1px solid #e5e5e8;
   background: #fafafb;
+  min-height: 30px;
+}
+.path-bar #device-chip { flex: 0 0 auto; }
+#breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   font-size: 12px;
-  min-height: 28px;
 }
 .crumb-link { cursor: pointer; color: #0066cc; }
 .crumb-link:hover { text-decoration: underline; }
@@ -313,14 +330,15 @@ tbody tr.selected td { background: #d0e3ff; }
   header { background: #252528; border-bottom-color: #36363a; }
   #nav-buttons button { background: #2c2c30; border-color: #44444a; color: inherit; }
   #nav-buttons button:hover:not(:disabled) { background: #34343a; }
-  #breadcrumb.path-bar, #status-bar { background: #252528; border-top-color: #36363a; }
+  .path-bar, #status-bar { background: #252528; border-top-color: #36363a; }
   .crumb-current { color: #cdcdd0; }
   .crumb-sep { color: #666; }
   #status-bar { color: #999; }
+  #device-chip-chevron:hover { background: rgba(255, 255, 255, 0.1); }
   #device-chip { background: #2c2c30; border-color: #44444a; color: inherit; }
   #device-chip:hover { background: #34343a; }
   #device-chip.is-open { background: #3a3a40; }
-  #device-menu { background: #2e2e32; border-color: #44444a; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5); }
+  #device-menu { background: #2e2e32; border-color: #44444a; box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.5); }
   .device-menu-item:hover { background: #34343a; }
   .device-menu-item.active { background: #2c4474; }
   .device-menu-sep { background: #44444a; }

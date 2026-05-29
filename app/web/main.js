@@ -9,6 +9,7 @@ const $ = (id) => {
 
 const deviceChip = $("device-chip");
 const deviceChipLabel = $("device-chip-label");
+const deviceChipChevron = $("device-chip-chevron");
 const deviceMenu = $("device-menu");
 const breadcrumbEl = $("breadcrumb");
 const statusEl = $("status");
@@ -121,13 +122,9 @@ async function refreshDevices({ autoOpen = false } = {}) {
 function updateDeviceChip() {
   const open = lastDevices.find((d) => d.id === openDeviceId);
   deviceChipLabel.textContent = open ? open.label : "No device";
-  deviceChip.title = open
-    ? `${open.vendor_id.toString(16)}:${open.product_id.toString(16)} · ${open.id}`
-    : "Pick a device";
+  // The chip body now navigates to the device root; the ▾ switches devices.
+  deviceChip.title = open ? "Go to device root" : "Pick a device";
   deviceChip.classList.toggle("no-device", !open);
-  // Hide the chevron when there's nothing to switch to — the chip then reads
-  // as a label rather than a control. Still clickable to refresh.
-  deviceChip.classList.toggle("solo", lastDevices.length <= 1);
 }
 
 function renderDeviceMenu() {
@@ -818,34 +815,33 @@ function attachDragOut(tr, e) {
   });
 }
 
-// The bottom path bar. Each ancestor is a clickable crumb (navigates, so it
-// joins history); the current folder is shown bold and inert. Empty when no
-// device is open.
+// The breadcrumb crumbs, following the device chip in the path bar. The device
+// chip itself is the root (cwd ""), so we render only the path segments here —
+// ancestors are clickable links (navigate, joining history), the current folder
+// is bold and inert. Empty at the device root or with no device.
 function renderBreadcrumb() {
   breadcrumbEl.innerHTML = "";
-  if (!openDeviceId) return;
+  if (!openDeviceId || !cwd) return;
 
-  const crumbs = [{ label: "Device", path: "" }];
-  if (cwd) {
-    const acc = [];
-    for (const seg of cwd.split("/")) {
-      acc.push(seg);
-      crumbs.push({ label: seg, path: acc.join("/") });
-    }
-  }
+  const segments = cwd.split("/");
+  const acc = [];
+  segments.forEach((seg, i) => {
+    acc.push(seg);
+    // A leading separator on every segment (including the first) reads as the
+    // join from the device chip: "[chip ▾] › documents › Downloads".
+    const sep = document.createElement("span");
+    sep.className = "crumb-sep";
+    sep.textContent = "›";
+    breadcrumbEl.appendChild(sep);
 
-  crumbs.forEach((c, i) => {
-    if (i > 0) {
-      const sep = document.createElement("span");
-      sep.className = "crumb-sep";
-      sep.textContent = "›";
-      breadcrumbEl.appendChild(sep);
-    }
-    const isCurrent = i === crumbs.length - 1;
+    const isCurrent = i === segments.length - 1;
     const el = document.createElement(isCurrent ? "span" : "a");
-    el.textContent = c.label;
+    el.textContent = seg;
     el.className = isCurrent ? "crumb-current" : "crumb-link";
-    if (!isCurrent) el.addEventListener("click", () => navigateTo(c.path));
+    if (!isCurrent) {
+      const path = acc.join("/");
+      el.addEventListener("click", () => navigateTo(path));
+    }
     breadcrumbEl.appendChild(el);
   });
 }
@@ -957,7 +953,21 @@ function folderSizeLabel(e) {
   return "—";
 }
 
-deviceChip.addEventListener("click", toggleDeviceMenu);
+// The chip is the path root: its body jumps to the device's top level, while
+// the ▾ chevron opens the device switcher. With no device open there's no root
+// to go to, so the whole chip falls back to opening the menu (to pick/refresh).
+deviceChip.addEventListener("click", () => {
+  if (openDeviceId) {
+    hideDeviceMenu();
+    navigateTo("");
+  } else {
+    toggleDeviceMenu();
+  }
+});
+deviceChipChevron.addEventListener("click", (ev) => {
+  ev.stopPropagation(); // don't also trigger the chip's go-to-root click
+  toggleDeviceMenu();
+});
 // Re-enumerate when the window regains focus so hot-plugged devices show up
 // without the user having to open the chip menu first. Cheap call.
 window.addEventListener("focus", () => { refreshDevices(); });

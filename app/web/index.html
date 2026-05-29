@@ -9,10 +9,6 @@
   <body>
     <main id="app">
       <header>
-        <button id="device-chip" type="button" title="Switch device">
-          <span id="device-chip-label">No device</span>
-          <span id="device-chip-chevron" aria-hidden="true">▾</span>
-        </button>
         <div id="nav-buttons" role="group">
           <button id="nav-back" title="Back">‹</button>
           <button id="nav-forward" title="Forward">›</button>
@@ -36,7 +32,13 @@
         <div id="grid" hidden></div>
         <div id="empty">No device selected.</div>
       </div>
-      <nav id="breadcrumb" class="path-bar"></nav>
+      <div class="path-bar">
+        <button id="device-chip" type="button" title="Go to device root">
+          <span id="device-chip-label">No device</span>
+          <span id="device-chip-chevron" aria-hidden="true" title="Switch device">▾</span>
+        </button>
+        <nav id="breadcrumb"></nav>
+      </div>
       <footer id="status-bar"><span id="status"></span></footer>
       <div id="dropzone-overlay" hidden>Drop to upload</div>
       <ul id="context-menu" hidden></ul>
