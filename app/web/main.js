@@ -582,6 +582,16 @@ window.addEventListener("blur", () => {
 });
 document.addEventListener("scroll", hideContextMenu, true);
 
+// Suppress the WebView's built-in context menu (its "Reload" reloads only the
+// JS, not the Rust session, which then can't re-open the still-held device).
+// Our own file/row menus are shown explicitly by their handlers, so this only
+// kills the default. Inputs are exempt so a future search field keeps paste etc.
+document.addEventListener("contextmenu", (ev) => {
+  const tag = ev.target?.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA") return;
+  ev.preventDefault();
+});
+
 // ---------------------------------------------------------------------------
 // Delete + Save-to
 

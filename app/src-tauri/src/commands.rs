@@ -41,6 +41,22 @@ pub async fn open_device(
     args: OpenDeviceArgs,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    // If we already hold THIS device, release it before re-opening. MTP grants
+    // exclusive USB access, so re-claiming a device this process already has
+    // open would fail against our own claim. This happens after a webview
+    // reload: the JS restarts and re-runs open_device, but this Rust session is
+    // untouched and still holds the device. For a *different* device we keep the
+    // current session until the new one opens, so a failed switch (e.g. the
+    // target is busy in another app) doesn't leave us with no session at all.
+    let holding_same = {
+        let guard = state.current.lock().map_err(|_| "session lock poisoned".to_string())?;
+        guard.as_ref().is_some_and(|s| s.device_id == args.device_id)
+    };
+    if holding_same {
+        let mut guard = state.current.lock().map_err(|_| "session lock poisoned".to_string())?;
+        *guard = None; // drops the old MtpFs, releasing its USB device
+    }
+
     let fs = MtpFs::open(args.location_id).map_err(err)?;
     // Wipe any cached thumbs from a prior session with this device — PTP
     // object handles are not guaranteed stable across sessions, so a fresh
