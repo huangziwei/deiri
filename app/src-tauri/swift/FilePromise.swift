@@ -5,7 +5,8 @@
 // work around it by:
 //
 //   1. The frontend calls `filepromise_arm` from `mousedown` on a row,
-//      stashing (objectPath, suggestedName, sizeBytes) into a pending slot.
+//      stashing (objectPath, suggestedName, sizeBytes, isDir) into a pending
+//      slot.
 //   2. A process-local NSEvent monitor watches every left-mouse-down/dragged
 //      in the app. When a `.leftMouseDragged` lands while a row is armed, we
 //      start an NSDraggingSession on the event's window using a real
@@ -35,6 +36,11 @@ private struct PendingDrag {
     let objectPath: String
     let suggestedName: String
     let sizeBytes: UInt64
+    // Folders need a directory UTI (`public.folder`) so Finder treats the
+    // promise as a tree to populate, not a flat file. The Rust resolver's
+    // `download_to` figures out file-vs-folder on the device side on its own;
+    // this flag is only here so `startDrag` can pick the right UTI/icon.
+    let isDir: Bool
 }
 
 private final class FilePromiseState {
@@ -114,12 +120,14 @@ public func filepromise_install(
 public func filepromise_arm(
     objectPath: UnsafePointer<CChar>,
     suggestedName: UnsafePointer<CChar>,
-    sizeBytes: UInt64
+    sizeBytes: UInt64,
+    isDir: Bool
 ) {
     FilePromiseState.shared.pending = PendingDrag(
         objectPath: String(cString: objectPath),
         suggestedName: String(cString: suggestedName),
-        sizeBytes: sizeBytes
+        sizeBytes: sizeBytes,
+        isDir: isDir
     )
 }
 
@@ -131,8 +139,15 @@ public func filepromise_cancel() {
 // MARK: - Drag start
 
 private func startDrag(view: NSView, downEvent: NSEvent, payload: PendingDrag) {
-    let ext = (payload.suggestedName as NSString).pathExtension
-    let uti = UTType(filenameExtension: ext) ?? UTType.data
+    let uti: UTType
+    if payload.isDir {
+        // public.folder — Finder makes a directory at the promise URL and our
+        // resolver fills it via the recursive `download_folder`.
+        uti = .folder
+    } else {
+        let ext = (payload.suggestedName as NSString).pathExtension
+        uti = UTType(filenameExtension: ext) ?? UTType.data
+    }
 
     let delegate = PromiseDelegate(payload: payload)
     // Strong-retain the delegate until the drag session ends — see comment

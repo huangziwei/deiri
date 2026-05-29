@@ -32,6 +32,7 @@ unsafe extern "C" {
         object_path: *const c_char,
         suggested_name: *const c_char,
         size_bytes: u64,
+        is_dir: bool,
     );
     fn filepromise_cancel();
 }
@@ -105,10 +106,11 @@ pub fn drag_arm(
     object_path: String,
     suggested_name: String,
     size_bytes: u64,
+    is_dir: bool,
 ) -> Result<(), String> {
     let path_c = CString::new(object_path).map_err(|e| e.to_string())?;
     let name_c = CString::new(suggested_name).map_err(|e| e.to_string())?;
-    unsafe { filepromise_arm(path_c.as_ptr(), name_c.as_ptr(), size_bytes) };
+    unsafe { filepromise_arm(path_c.as_ptr(), name_c.as_ptr(), size_bytes, is_dir) };
     Ok(())
 }
 

@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result, anyhow};
@@ -21,7 +21,9 @@ use bytes::Bytes;
 use futures::StreamExt;
 use futures::executor::block_on;
 use mtp_rs::mtp::{MtpDevice, NewObjectInfo, Storage};
-use mtp_rs::ptp::{unpack_string, DateTime, ObjectHandle, ObjectPropertyCode, PtpSession};
+use mtp_rs::ptp::{
+    unpack_string, DateTime, ObjectHandle, ObjectInfo, ObjectPropertyCode, PtpSession,
+};
 
 use crate::fs::{Entry, FolderSize, Fs, StorageInfo};
 use crate::path::TPath;
@@ -117,6 +119,177 @@ impl MtpFs {
             };
         }
         Ok(parent)
+    }
+
+    /// Like [`resolve`](Self::resolve), but returns the leaf object's full
+    /// [`ObjectInfo`] (so callers can tell a file from a folder), not just its
+    /// handle. `Ok(None)` if any segment is missing or `path` is empty (the
+    /// storage root has no object of its own).
+    async fn resolve_object(&self, path: &TPath) -> Result<Option<ObjectInfo>> {
+        let segments = path.segments();
+        let mut parent: Option<ObjectHandle> = None;
+        for (i, segment) in segments.iter().enumerate() {
+            let entries = self
+                .storage
+                .list_objects(parent)
+                .await
+                .map_err(map_err)?;
+            match entries.into_iter().find(|o| &o.filename == segment) {
+                Some(obj) if i + 1 == segments.len() => return Ok(Some(obj)),
+                Some(obj) => parent = Some(obj.handle),
+                None => return Ok(None),
+            }
+        }
+        Ok(None)
+    }
+
+    /// Recursively download the folder at `root` into the local directory
+    /// `dest` — `dest` *is* the folder (created if missing), so dragging out a
+    /// device folder "DCIM" to `/tmp` is called with `dest = /tmp/DCIM`. Empty
+    /// subfolders are preserved. Iterative (explicit stack) so deep trees can't
+    /// blow the stack, and so we hold the one `op_lock` for the whole walk like
+    /// [`delete_dir`](Self::delete_dir) does.
+    async fn download_folder(&self, root: ObjectHandle, dest: &Path) -> Result<()> {
+        std::fs::create_dir_all(dest)
+            .with_context(|| format!("create local dir {}", dest.display()))?;
+        let mut stack: Vec<(ObjectHandle, PathBuf)> = vec![(root, dest.to_path_buf())];
+        while let Some((handle, local_dir)) = stack.pop() {
+            let children = self
+                .storage
+                .list_objects(Some(handle))
+                .await
+                .map_err(map_err)?;
+            for c in children {
+                let child_local = local_dir.join(&c.filename);
+                if c.is_folder() {
+                    std::fs::create_dir_all(&child_local)
+                        .with_context(|| format!("create local dir {}", child_local.display()))?;
+                    stack.push((c.handle, child_local));
+                } else {
+                    let bytes = self.storage.download(c.handle).await.map_err(map_err)?;
+                    std::fs::write(&child_local, &bytes).with_context(|| {
+                        format!("write {} ({} bytes)", child_local.display(), bytes.len())
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Upload one local file as `name` under `parent`, overwriting any existing
+    /// object of the same name (MTP has no atomic replace — delete then write).
+    /// `existing` is `parent`'s current listing, passed in so a folder upload
+    /// fetches it once per directory and reuses it across that directory's
+    /// files instead of re-listing per file.
+    async fn upload_file(
+        &self,
+        parent: Option<ObjectHandle>,
+        name: &str,
+        src: &Path,
+        existing: &[ObjectInfo],
+    ) -> Result<()> {
+        if let Some(old) = existing.iter().find(|o| o.filename == name) {
+            self.storage
+                .delete(old.handle)
+                .await
+                .map_err(map_err)
+                .with_context(|| format!("delete {name} before overwrite"))?;
+        }
+
+        let file = std::fs::File::open(src).with_context(|| format!("open {}", src.display()))?;
+        let size = file
+            .metadata()
+            .with_context(|| format!("stat {}", src.display()))?
+            .len();
+        let info = NewObjectInfo::file(name, size);
+
+        // Stream the file from disk in fixed-size chunks. See the comment in
+        // `upload_from`'s prior single-file body (now this helper) for why the
+        // sync `read` is fine under `block_on` and why the stream is `.boxed()`.
+        let stream = futures::stream::unfold(file, move |mut f| async move {
+            let mut buf = vec![0u8; UPLOAD_CHUNK];
+            match f.read(&mut buf) {
+                Ok(0) => None,
+                Ok(n) => {
+                    buf.truncate(n);
+                    Some((Ok::<_, std::io::Error>(Bytes::from(buf)), f))
+                }
+                Err(e) => Some((Err(e), f)),
+            }
+        })
+        .boxed();
+        self.storage
+            .upload(parent, info, stream)
+            .await
+            .map_err(map_err)
+            .with_context(|| format!("upload {name}"))?;
+        Ok(())
+    }
+
+    /// Recursively upload the local directory `src` into device path `dest`.
+    /// `dest` is created (with any missing ancestors) if absent, or merged into
+    /// if it already exists — files colliding by name are overwritten, matching
+    /// the single-file path. Symlinks and other non-file/non-dir entries are
+    /// skipped. Iterative for the same reasons as [`download_folder`](Self::download_folder).
+    async fn upload_folder(&self, src: &Path, dest: &TPath) -> Result<()> {
+        let root = self
+            .ensure_folder(dest)
+            .await?
+            .ok_or_else(|| anyhow!("upload: empty destination path for directory"))?;
+        let mut stack: Vec<(PathBuf, ObjectHandle)> = vec![(src.to_path_buf(), root)];
+        while let Some((local_dir, parent)) = stack.pop() {
+            // One listing per device folder, reused for both subfolder lookup
+            // and the per-file overwrite check across all of `local_dir`'s
+            // entries. Safe to reuse despite the deletes in `upload_file`: a
+            // directory's entries have distinct names, so each delete touches a
+            // different `existing` row and no later lookup sees a stale handle.
+            let existing = self
+                .storage
+                .list_objects(Some(parent))
+                .await
+                .map_err(map_err)?;
+            let read =
+                std::fs::read_dir(&local_dir).with_context(|| format!("read dir {}", local_dir.display()))?;
+            for entry in read {
+                let entry =
+                    entry.with_context(|| format!("read entry in {}", local_dir.display()))?;
+                let ftype = entry
+                    .file_type()
+                    .with_context(|| format!("stat {}", entry.path().display()))?;
+                let os_name = entry.file_name();
+                let name = os_name
+                    .to_str()
+                    .ok_or_else(|| anyhow!("non-UTF-8 filename: {}", entry.path().display()))?;
+                let child_local = entry.path();
+                if ftype.is_dir() {
+                    let child_handle = match existing.iter().find(|o| o.filename == name) {
+                        Some(o) if o.is_folder() => o.handle,
+                        Some(_) => {
+                            return Err(anyhow!(
+                                "destination already has a file named `{name}` \
+                                 where a folder is needed"
+                            ));
+                        }
+                        None => self
+                            .storage
+                            .create_folder(Some(parent), name)
+                            .await
+                            .map_err(map_err)
+                            .with_context(|| format!("create folder {name}"))?,
+                    };
+                    stack.push((child_local, child_handle));
+                } else if ftype.is_file() {
+                    self.upload_file(Some(parent), name, &child_local, &existing)
+                        .await?;
+                } else {
+                    tracing::debug!(
+                        path = %child_local.display(),
+                        "skipping non-file/non-dir entry in folder upload"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -290,17 +463,22 @@ impl Fs for MtpFs {
     fn download_to(&self, path: &TPath, dest: &Path) -> Result<()> {
         let _g = self.op_lock.lock().expect("op_lock poisoned");
         block_on(async {
-            let handle = self
-                .resolve(path)
+            let obj = self
+                .resolve_object(path)
                 .await?
                 .ok_or_else(|| anyhow!("download: object not found at `{path}`"))?;
-            let bytes = self.storage.download(handle).await.map_err(map_err)?;
-            // mtp-rs's current `download` buffers the whole object. For
-            // multi-GB pulls we want a streaming variant — TODO when we add
-            // progress reporting to the drag-out callback.
-            std::fs::write(dest, &bytes)
-                .with_context(|| format!("write {} ({} bytes)", dest.display(), bytes.len()))?;
-            Ok(())
+            if obj.is_folder() {
+                // Folder drag-out / "Save to…": recreate the subtree locally.
+                self.download_folder(obj.handle, dest).await
+            } else {
+                let bytes = self.storage.download(obj.handle).await.map_err(map_err)?;
+                // mtp-rs's current `download` buffers the whole object. For
+                // multi-GB pulls we want a streaming variant — TODO when we add
+                // progress reporting to the drag-out callback.
+                std::fs::write(dest, &bytes)
+                    .with_context(|| format!("write {} ({} bytes)", dest.display(), bytes.len()))?;
+                Ok(())
+            }
         })
     }
 
@@ -317,63 +495,27 @@ impl Fs for MtpFs {
     fn upload_from(&self, src: &Path, dest: &TPath) -> Result<()> {
         let _g = self.op_lock.lock().expect("op_lock poisoned");
         block_on(async {
+            // Directory source (a folder dragged in from Finder): create the
+            // destination folder and recurse. Plain file: the single-object
+            // path below. We branch on the *local* fs type, mirroring how
+            // `download_to` branches on the *device* object type.
+            let meta = std::fs::metadata(src)
+                .with_context(|| format!("stat {}", src.display()))?;
+            if meta.is_dir() {
+                return self.upload_folder(src, dest).await;
+            }
+
             let parent_path = dest.parent().unwrap_or_default();
             let name = dest
                 .name()
                 .ok_or_else(|| anyhow!("upload: empty destination path"))?;
             let parent = self.ensure_folder(&parent_path).await?;
-
-            // Delete-then-upload for overwrite. MTP has no atomic replace —
-            // we accept a small window where neither object is present, in
-            // exchange for code symmetry with the pristine-write case.
-            let entries = self
+            let existing = self
                 .storage
                 .list_objects(parent)
                 .await
                 .map_err(map_err)?;
-            if let Some(existing) = entries.into_iter().find(|o| o.filename == name) {
-                self.storage
-                    .delete(existing.handle)
-                    .await
-                    .map_err(map_err)
-                    .with_context(|| format!("delete {name} before overwrite"))?;
-            }
-
-            let file = std::fs::File::open(src)
-                .with_context(|| format!("open {}", src.display()))?;
-            let size = file
-                .metadata()
-                .with_context(|| format!("stat {}", src.display()))?
-                .len();
-            let info = NewObjectInfo::file(name, size);
-
-            // Stream the file from disk in fixed-size chunks. `read` is sync
-            // inside the async block — fine here because we're under
-            // `block_on` with no other tasks to schedule. Avoids buffering
-            // multi-GB uploads in RAM.
-            //
-            // `.boxed()` because `Storage::upload` requires `Unpin + Send`
-            // and `stream::unfold` is `!Unpin` (its state is pinned for the
-            // future to resume across awaits). Boxing flips both Pin and
-            // Unpin in our favor without any allocation per chunk.
-            let stream = futures::stream::unfold(file, move |mut f| async move {
-                let mut buf = vec![0u8; UPLOAD_CHUNK];
-                match f.read(&mut buf) {
-                    Ok(0) => None,
-                    Ok(n) => {
-                        buf.truncate(n);
-                        Some((Ok::<_, std::io::Error>(Bytes::from(buf)), f))
-                    }
-                    Err(e) => Some((Err(e), f)),
-                }
-            })
-            .boxed();
-            self.storage
-                .upload(parent, info, stream)
-                .await
-                .map_err(map_err)
-                .with_context(|| format!("upload {name}"))?;
-            Ok(())
+            self.upload_file(parent, name, src, &existing).await
         })
     }
 

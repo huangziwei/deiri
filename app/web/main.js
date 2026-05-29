@@ -535,7 +535,7 @@ function renderListView() {
     });
     tr.addEventListener("contextmenu", (ev) => onRowContextMenu(idx, ev));
 
-    if (!e.is_dir) attachDragOut(tr, e);
+    attachDragOut(tr, e); // files and folders both drag out (folders recurse)
 
     listBody.appendChild(tr);
   });
@@ -602,7 +602,7 @@ function buildTile(e, idx) {
     if (e.is_dir) navigateTo(cwd ? `${cwd}/${e.name}` : e.name);
   });
   tile.addEventListener("contextmenu", (ev) => onRowContextMenu(idx, ev));
-  if (!e.is_dir) attachDragOut(tile, e);
+  attachDragOut(tile, e); // files and folders both drag out (folders recurse)
   return tile;
 }
 
@@ -663,14 +663,13 @@ function onRowContextMenu(idx, ev) {
   const selectedEntries = [...selected]
     .map((p) => entries.find((x) => pathFor(x.name) === p))
     .filter(Boolean);
-  const anyFile = selectedEntries.some((e) => !e.is_dir);
   const selectedFolders = selectedEntries.filter((e) => e.is_dir);
   const count = selected.size;
 
   const items = [
     {
+      // Both files and folders can be saved — folders pull their whole subtree.
       label: count > 1 ? `Save ${count} items to…` : "Save to…",
-      disabled: !anyFile,
       onSelect: saveSelectedTo,
     },
   ];
@@ -810,9 +809,10 @@ async function saveSelectedTo() {
   for (const path of [...selected]) {
     const name = path.split("/").pop();
     const ent = entries.find((x) => x.name === name);
-    // Skip dirs for now — recursive MTP download isn't wired yet.
-    if (!ent || ent.is_dir) continue;
+    if (!ent) continue;
     try {
+      // download_to recreates a folder's whole subtree at dest when source is
+      // a directory; for a file it just writes the file.
       await window.api.invoke("download_to", {
         args: { source: path, dest: `${destDir}/${name}` },
       });
@@ -982,6 +982,7 @@ function attachDragOut(tr, e) {
       objectPath: cwd ? `${cwd}/${e.name}` : e.name,
       suggestedName: e.name,
       sizeBytes: e.size ?? 0,
+      isDir: e.is_dir,
     });
   });
   tr.addEventListener("mouseleave", () => {

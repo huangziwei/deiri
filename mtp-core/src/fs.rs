@@ -73,7 +73,10 @@ pub trait Fs: Send + Sync {
     /// subtree cache from one call instead of re-walking when the user steps in.
     fn dir_sizes_by_id(&self, object_id: u32) -> Result<Vec<FolderSize>>;
 
-    /// Download `path` to a local file. Used by the drag-out promise callback.
+    /// Download `path` to `dest`. If `path` is a file, `dest` is the local file
+    /// to write; if it's a folder, `dest` *is* that folder (created if missing)
+    /// and the whole subtree is recreated beneath it. Used by the drag-out
+    /// promise callback and the "Save to…" menu.
     fn download_to(&self, path: &TPath, dest: &Path) -> Result<()>;
 
     /// Fetch the thumbnail for the given raw PTP object handle. The id must
@@ -83,8 +86,10 @@ pub trait Fs: Send + Sync {
     /// before calling. Bytes are whatever `thumb_format` says (usually JPEG).
     fn get_thumbnail_by_id(&self, object_id: u32) -> Result<Vec<u8>>;
 
-    /// Upload a local file into `dest`. Atomic on success; nothing visible at
-    /// `dest` if interrupted.
+    /// Upload `src` to `dest`. If `src` is a file, it's written atomically at
+    /// `dest` (nothing visible there if interrupted). If `src` is a directory,
+    /// `dest` is created (or merged into if present) and the local tree is
+    /// uploaded recursively — colliding files overwritten, symlinks skipped.
     fn upload_from(&self, src: &Path, dest: &TPath) -> Result<()>;
 
     fn delete(&self, path: &TPath) -> Result<bool>;
