@@ -49,8 +49,14 @@ let anchorIndex = -1; // for shift-click range; -1 when no anchor
 // session). Value is the literal "calculating" while a dir_size call is in
 // flight, or a byte count once it resolves. Read by the list view's size cell;
 // cleared on every refreshList so a fresh listing recomputes rather than
-// showing a possibly-stale total. See calculateFolderSize.
+// showing a possibly-stale total. See calculateFolderSizes.
 const folderSizeState = new Map();
+
+// Pending folder-size work. Folders are sized one at a time (see pumpSizeQueue)
+// so selecting hundreds and hitting "Calculate Size" doesn't spawn hundreds of
+// concurrent backend calls. Cleared by refreshList when the listing changes.
+const sizeQueue = [];
+let sizeQueueRunning = false;
 
 function pathFor(name) {
   return cwd ? `${cwd}/${name}` : name;
@@ -214,6 +220,7 @@ async function refreshList() {
   selected.clear();
   anchorIndex = -1;
   folderSizeState.clear();
+  sizeQueue.length = 0; // drop pending size work for the folder we're leaving
   if (!openDeviceId) {
     entries = [];
     renderList();
@@ -274,6 +281,7 @@ function renderListView() {
     tr.dataset.name = e.name;
     tr.dataset.isDir = String(e.is_dir);
     tr.dataset.idx = String(idx);
+    tr.dataset.objectId = String(e.object_id); // for targeted folder-size cell updates
     if (selected.has(pathFor(e.name))) tr.classList.add("selected");
 
     const nameTd = document.createElement("td");
@@ -446,7 +454,7 @@ function onRowContextMenu(idx, ev) {
       label: selectedFolders.length > 1
         ? `Calculate size of ${selectedFolders.length} folders`
         : "Calculate Size",
-      onSelect: () => selectedFolders.forEach(calculateFolderSize),
+      onSelect: () => calculateFolderSizes(selectedFolders),
     });
   }
   items.push({ separator: true });
@@ -574,29 +582,66 @@ async function saveSelectedTo() {
   }
 }
 
-// Recursively total a folder's size (Finder's "Calculate Size"). The row's
-// Size cell shows "Calculating…" while the dir_size call runs, then the byte
-// total. The result lives in folderSizeState keyed by object_id so a re-render
-// (sort, another folder finishing) keeps it; refreshList wipes it. Folders can
-// be sized concurrently — each call repaints only if we're still in the folder
-// it was started from, so a result that lands after the user navigated away is
-// dropped rather than written into the wrong listing.
-async function calculateFolderSize(entry) {
-  if (folderSizeState.get(entry.object_id) === "calculating") return;
-  const startedCwd = cwd;
-  const path = pathFor(entry.name);
-  folderSizeState.set(entry.object_id, "calculating");
-  renderList();
-  try {
-    const bytes = await window.api.invoke("dir_size", { path });
-    if (cwd !== startedCwd) return;
-    folderSizeState.set(entry.object_id, bytes);
-  } catch (err) {
-    console.error("dir_size failed", path, err);
-    if (cwd === startedCwd) folderSizeState.delete(entry.object_id);
-    alert(`Couldn't calculate the size of ${entry.name}:\n\n${err}`);
+// Recursively total folders' sizes (Finder's "Calculate Size"). Each row's Size
+// cell shows "Calculating…" then the byte total. Results live in folderSizeState
+// keyed by object_id so a re-render (sort, view switch) keeps them; refreshList
+// wipes them.
+//
+// Selecting hundreds of folders and sizing them at once has to stay responsive,
+// so: mark every folder "calculating" with a SINGLE render here, then let the
+// queue update one cell at a time as results arrive. Re-rendering the whole
+// table per folder (what we did before) froze the UI on big selections.
+function calculateFolderSizes(folders) {
+  let queued = 0;
+  for (const entry of folders) {
+    const s = folderSizeState.get(entry.object_id);
+    if (s === "calculating" || typeof s === "number") continue; // in flight or already known
+    folderSizeState.set(entry.object_id, "calculating");
+    sizeQueue.push({ entry, cwd });
+    queued++;
   }
-  if (cwd === startedCwd) renderList();
+  if (queued > 0) renderList();
+  pumpSizeQueue();
+}
+
+// Drain sizeQueue one folder at a time. Sequential on purpose: the backend
+// serializes MTP access behind a single lock anyway, so concurrent dir_size
+// calls wouldn't finish faster — they'd just tie up worker threads and starve
+// other operations. One at a time keeps the device pipe busy and lets results
+// stream in, and leaves a gap between folders where a navigation can interleave.
+async function pumpSizeQueue() {
+  if (sizeQueueRunning) return;
+  sizeQueueRunning = true;
+  let alerted = false;
+  while (sizeQueue.length > 0) {
+    const { entry, cwd: startedCwd } = sizeQueue.shift();
+    if (cwd !== startedCwd) continue; // navigated away; state already cleared
+    try {
+      const bytes = await window.api.invoke("dir_size", {
+        args: { object_id: entry.object_id },
+      });
+      if (cwd !== startedCwd) continue; // navigated away while this one ran
+      folderSizeState.set(entry.object_id, bytes);
+    } catch (err) {
+      console.error("dir_size failed", entry.name, err);
+      if (cwd === startedCwd) folderSizeState.delete(entry.object_id);
+      if (!alerted) {
+        alerted = true; // one alert per run, not one per folder
+        alert(`Couldn't calculate folder size:\n\n${err}`);
+      }
+    }
+    updateFolderSizeCell(entry); // O(1) cell repaint, not a full table rebuild
+  }
+  sizeQueueRunning = false;
+}
+
+// Repaint a single folder's Size cell from folderSizeState. No-op in grid view
+// (no size shown there) or if the row isn't currently in the DOM.
+function updateFolderSizeCell(entry) {
+  if (viewMode !== "list") return;
+  const row = listBody.querySelector(`tr[data-object-id="${entry.object_id}"]`);
+  const cell = row && row.querySelector(".cell-size");
+  if (cell) cell.textContent = folderSizeLabel(entry);
 }
 
 // ---------------------------------------------------------------------------
@@ -774,7 +819,7 @@ function formatModified(epochSecs) {
 }
 
 // Size-column text for a folder row. Folders have no size until the user asks
-// for one via "Calculate Size" (see calculateFolderSize); until then, "—".
+// for one via "Calculate Size" (see calculateFolderSizes); until then, "—".
 function folderSizeLabel(e) {
   const s = folderSizeState.get(e.object_id);
   if (s === "calculating") return "Calculating…";

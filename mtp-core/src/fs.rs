@@ -41,14 +41,18 @@ pub trait Fs: Send + Sync {
     fn exists(&self, path: &TPath) -> Result<bool>;
     fn storage_info(&self) -> Option<StorageInfo>;
 
-    /// Total size in bytes of every file beneath `path`, recursively. `path`
-    /// must name a directory; the directories themselves contribute nothing.
+    /// Total size in bytes of every file beneath the folder with the given raw
+    /// PTP object handle, recursively. The directories themselves contribute
+    /// nothing. The id must come from a previous [`Entry::object_id`] on the
+    /// *same* session (handles aren't stable across reconnects) — same contract
+    /// as [`Self::get_thumbnail_by_id`]. Taking the handle directly avoids
+    /// re-resolving the path from the root on every call, which is what makes
+    /// sizing many folders at once viable (no repeated re-walk of the parent).
     ///
-    /// This walks the whole subtree with one metadata round-trip per object,
-    /// so it can be slow for large trees — it's meant as an explicit,
-    /// on-demand action (a "Calculate Size" menu item), not something to run
-    /// during a normal listing.
-    fn dir_size(&self, path: &TPath) -> Result<u64>;
+    /// Walks the whole subtree with one metadata round-trip per object, so it's
+    /// meant as an explicit, on-demand action (a "Calculate Size" menu item),
+    /// not something to run during a normal listing.
+    fn dir_size_by_id(&self, object_id: u32) -> Result<u64>;
 
     /// Download `path` to a local file. Used by the drag-out promise callback.
     fn download_to(&self, path: &TPath, dest: &Path) -> Result<()>;

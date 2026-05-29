@@ -67,12 +67,17 @@ pub async fn list_dir(path: String, state: State<'_, AppState>) -> Result<Vec<En
     state.with_fs(|fs| fs.list(&TPath::parse(&path))).map_err(err)
 }
 
-/// Recursive byte total of a folder, for the "Calculate Size" menu action.
-/// Potentially slow (one round-trip per object); serialized behind the session
-/// lock like every other op, so it blocks concurrent MTP calls while it runs.
+#[derive(Deserialize)]
+pub struct DirSizeArgs {
+    pub object_id: u32,
+}
+
+/// Recursive byte total of a folder (by object handle), for the "Calculate
+/// Size" menu action. Potentially slow — one round-trip per object in the
+/// subtree — and serialized behind the session lock like every other op.
 #[tauri::command]
-pub async fn dir_size(path: String, state: State<'_, AppState>) -> Result<u64, String> {
-    state.with_fs(|fs| fs.dir_size(&TPath::parse(&path))).map_err(err)
+pub async fn dir_size(args: DirSizeArgs, state: State<'_, AppState>) -> Result<u64, String> {
+    state.with_fs(|fs| fs.dir_size_by_id(args.object_id)).map_err(err)
 }
 
 #[tauri::command]
