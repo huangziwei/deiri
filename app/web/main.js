@@ -10,6 +10,7 @@ const $ = (id) => {
 const deviceChip = $("device-chip");
 const deviceChipLabel = $("device-chip-label");
 const deviceChipChevron = $("device-chip-chevron");
+const deviceRenameInput = $("device-rename");
 const deviceMenu = $("device-menu");
 const breadcrumbEl = $("breadcrumb");
 const statusEl = $("status");
@@ -99,6 +100,30 @@ function pathFor(name) {
 
 let lastDevices = [];
 
+// User-assigned device names, keyed by DeviceDescriptor.id (USB serial when the
+// device exposes one — stable across reconnects). Persisted in localStorage so
+// a renamed device keeps its name across launches. Overrides the generic label
+// the device reports (e.g. a Fuji camera's "USB PTP Camera"). See startRename.
+const ALIAS_STORAGE_KEY = "deiri.deviceAliases";
+let deviceAliases = {};
+try {
+  deviceAliases = JSON.parse(localStorage.getItem(ALIAS_STORAGE_KEY) || "{}") || {};
+} catch (err) {
+  console.error("reading device aliases failed", err);
+  deviceAliases = {};
+}
+function saveDeviceAliases() {
+  try {
+    localStorage.setItem(ALIAS_STORAGE_KEY, JSON.stringify(deviceAliases));
+  } catch (err) {
+    console.error("saving device aliases failed", err);
+  }
+}
+// Display name for a device: the user's alias if set, else what it reports.
+function deviceLabel(d) {
+  return deviceAliases[d.id] || d.label;
+}
+
 async function refreshDevices({ autoOpen = false } = {}) {
   let devices;
   try {
@@ -131,7 +156,7 @@ async function refreshDevices({ autoOpen = false } = {}) {
 
 function updateDeviceChip() {
   const open = lastDevices.find((d) => d.id === openDeviceId);
-  deviceChipLabel.textContent = open ? open.label : "No device";
+  deviceChipLabel.textContent = open ? deviceLabel(open) : "No device";
   // The chip body now navigates to the device root; the ▾ switches devices.
   deviceChip.title = open ? "Go to device root" : "Pick a device";
   deviceChip.classList.toggle("no-device", !open);
@@ -152,7 +177,7 @@ function renderDeviceMenu() {
       if (d.id === openDeviceId) item.classList.add("active");
       item.title = `${d.vendor_id.toString(16)}:${d.product_id.toString(16)} · ${d.id}`;
       const label = document.createElement("span");
-      label.textContent = d.label;
+      label.textContent = deviceLabel(d);
       item.appendChild(label);
       if (d.id === openDeviceId) {
         const check = document.createElement("span");
@@ -170,9 +195,17 @@ function renderDeviceMenu() {
   const sep = document.createElement("div");
   sep.className = "device-menu-sep";
   deviceMenu.appendChild(sep);
+  if (openDeviceId) {
+    const rename = document.createElement("button");
+    rename.type = "button";
+    rename.className = "device-menu-action";
+    rename.textContent = "Rename…";
+    rename.addEventListener("click", startRename);
+    deviceMenu.appendChild(rename);
+  }
   const refresh = document.createElement("button");
   refresh.type = "button";
-  refresh.className = "device-menu-refresh";
+  refresh.className = "device-menu-action";
   refresh.textContent = "Refresh";
   refresh.addEventListener("click", async () => {
     await refreshDevices();
@@ -198,6 +231,51 @@ function hideDeviceMenu() {
   deviceMenu.hidden = true;
   deviceChip.classList.remove("is-open");
 }
+
+// Rename the open device by editing its label inline (the chip is swapped for a
+// text field in place — no native prompt, which is unreliable in the webview).
+// The name is a local alias keyed by device id; clearing it (or typing the
+// device's own reported label) reverts to the default. See deviceAliases.
+function startRename() {
+  const open = lastDevices.find((d) => d.id === openDeviceId);
+  if (!open) return;
+  hideDeviceMenu();
+  deviceRenameInput.value = deviceLabel(open);
+  deviceChip.hidden = true;
+  deviceRenameInput.hidden = false;
+  deviceRenameInput.focus();
+  deviceRenameInput.select();
+}
+
+function commitRename() {
+  if (deviceRenameInput.hidden) return; // already closed (e.g. blur after Enter/Escape)
+  const open = lastDevices.find((d) => d.id === openDeviceId);
+  if (open) {
+    const name = deviceRenameInput.value.trim();
+    if (name === "" || name === open.label) delete deviceAliases[open.id];
+    else deviceAliases[open.id] = name;
+    saveDeviceAliases();
+  }
+  endRename();
+  updateDeviceChip();
+  if (!deviceMenu.hidden) renderDeviceMenu();
+}
+
+function endRename() {
+  deviceRenameInput.hidden = true;
+  deviceChip.hidden = false;
+}
+
+deviceRenameInput.addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") {
+    ev.preventDefault();
+    commitRename();
+  } else if (ev.key === "Escape") {
+    ev.preventDefault();
+    endRename(); // discard the edit
+  }
+});
+deviceRenameInput.addEventListener("blur", commitRename);
 
 async function openDevice(d) {
   try {
@@ -270,6 +348,7 @@ async function clearOpenDevice() {
   navHistory = [];
   navIndex = -1;
   storageText = "";
+  endRename(); // if the device vanished mid-rename, restore the chip
   invalidateFolderSizes(); // session gone — drop its cached sizes
   try {
     await window.api.invoke("close_device");

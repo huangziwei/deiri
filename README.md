@@ -9,8 +9,8 @@ Built with [Tauri](https://tauri.app/) on top of [`mtp-rs`](https://crates.io/cr
 ## Screenshots
 
 <p align="center">
-  <img src=".github/assets/view-list.png" height="300" />
-  <img src=".github/assets/view-grid.png" height="300" />
+  <img src=".github/assets/view-list.png" alt="List view" width="400" />
+  <img src=".github/assets/view-grid.png" alt="Grid view" width="400" />
 </p>
 
 ## Build

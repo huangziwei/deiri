@@ -38,6 +38,25 @@ body {
 }
 #device-chip:hover { background: #f0f0f4; }
 #device-chip.is-open { background: #e8e8ec; }
+/* The id selector above beats the UA `[hidden]` rule, so make hiding explicit
+   (the chip is swapped for the rename field during an inline rename). */
+#device-chip[hidden] { display: none; }
+
+/* Inline rename field — sits where the chip is, same size, so renaming doesn't
+   shift the path bar. */
+#device-rename {
+  flex: 0 0 auto;
+  max-width: 240px;
+  padding: 3px 8px;
+  border: 1px solid #2c7dff;
+  border-radius: 4px;
+  background: #fff;
+  font: inherit;
+  font-weight: 500;
+  color: inherit;
+  outline: none;
+}
+#device-rename[hidden] { display: none; }
 #device-chip-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -104,7 +123,7 @@ body {
   background: #e5e5e8;
   margin: 4px 6px;
 }
-.device-menu-refresh {
+.device-menu-action {
   display: block;
   width: 100%;
   text-align: left;
@@ -116,7 +135,7 @@ body {
   color: #0066cc;
   cursor: pointer;
 }
-.device-menu-refresh:hover { background: #f0f0f4; }
+.device-menu-action:hover { background: #f0f0f4; }
 
 header {
   display: flex;
@@ -393,12 +412,13 @@ body.col-resizing { cursor: col-resize; }
   #device-chip-chevron:hover { background: rgba(255, 255, 255, 0.1); }
   #device-chip { background: #2c2c30; border-color: #44444a; color: inherit; }
   #device-chip:hover { background: #34343a; }
+  #device-rename { background: #1e1e20; border-color: #2c7dff; color: inherit; }
   #device-chip.is-open { background: #3a3a40; }
   #device-menu { background: #2e2e32; border-color: #44444a; box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.5); }
   .device-menu-item:hover { background: #34343a; }
   .device-menu-item.active { background: #2c4474; }
   .device-menu-sep { background: #44444a; }
-  .device-menu-refresh:hover { background: #34343a; }
+  .device-menu-action:hover { background: #34343a; }
   th { background: #252528; }
   th, td { border-bottom-color: #2e2e32; }
   tbody tr:hover td { background: #2a3340; }
