@@ -184,6 +184,27 @@ impl Fs for MtpFs {
         })
     }
 
+    fn dir_size(&self, path: &TPath) -> Result<u64> {
+        let _g = self.op_lock.lock().expect("op_lock poisoned");
+        block_on(async {
+            let handle = self
+                .resolve(path)
+                .await?
+                .ok_or_else(|| anyhow!("dir_size: object not found at `{path}`"))?;
+            // Manual traversal (list each folder, recurse into subfolders)
+            // rather than the "native recursive" variant: GetObjectHandles with
+            // a specific parent returns only immediate children on most devices,
+            // so the native path isn't actually recursive for a subfolder. The
+            // manual walk is correct everywhere, at one listing per subfolder.
+            let objects = self
+                .storage
+                .list_objects_recursive_manual(Some(handle))
+                .await
+                .map_err(map_err)?;
+            Ok(objects.iter().filter(|o| o.is_file()).map(|o| o.size).sum())
+        })
+    }
+
     fn exists(&self, path: &TPath) -> Result<bool> {
         let _g = self.op_lock.lock().expect("op_lock poisoned");
         block_on(async { Ok(self.resolve(path).await?.is_some()) })

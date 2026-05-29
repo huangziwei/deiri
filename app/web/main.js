@@ -45,6 +45,13 @@ let renderGen = 0;
 const selected = new Set();
 let anchorIndex = -1; // for shift-click range; -1 when no anchor
 
+// Recursively-computed folder sizes, keyed by object_id (stable within a
+// session). Value is the literal "calculating" while a dir_size call is in
+// flight, or a byte count once it resolves. Read by the list view's size cell;
+// cleared on every refreshList so a fresh listing recomputes rather than
+// showing a possibly-stale total. See calculateFolderSize.
+const folderSizeState = new Map();
+
 function pathFor(name) {
   return cwd ? `${cwd}/${name}` : name;
 }
@@ -206,6 +213,7 @@ async function clearOpenDevice() {
 async function refreshList() {
   selected.clear();
   anchorIndex = -1;
+  folderSizeState.clear();
   if (!openDeviceId) {
     entries = [];
     renderList();
@@ -261,7 +269,7 @@ function renderListView() {
     nameTd.textContent = `${e.is_dir ? "📁" : "📄"} ${e.name}`;
     const sizeTd = document.createElement("td");
     sizeTd.className = "cell-size";
-    sizeTd.textContent = e.is_dir ? "—" : humanSize(e.size ?? 0);
+    sizeTd.textContent = e.is_dir ? folderSizeLabel(e) : humanSize(e.size ?? 0);
     const modTd = document.createElement("td");
     modTd.className = "cell-modified";
     modTd.textContent = formatModified(e.modified_at);
@@ -408,20 +416,34 @@ function onRowContextMenu(idx, ev) {
     .map((p) => entries.find((x) => pathFor(x.name) === p))
     .filter(Boolean);
   const anyFile = selectedEntries.some((e) => !e.is_dir);
+  const selectedFolders = selectedEntries.filter((e) => e.is_dir);
   const count = selected.size;
 
-  showContextMenu(ev.clientX, ev.clientY, [
+  const items = [
     {
       label: count > 1 ? `Save ${count} items to…` : "Save to…",
       disabled: !anyFile,
       onSelect: saveSelectedTo,
     },
-    { separator: true },
-    {
-      label: count > 1 ? `Delete ${count} items` : "Delete",
-      onSelect: deleteSelected,
-    },
-  ]);
+  ];
+  // Recursive folder sizing only has somewhere to show in the list view, so
+  // only offer it there. Acts on the folders in the selection; any files are
+  // left alone (they already show a size).
+  if (viewMode === "list" && selectedFolders.length > 0) {
+    items.push({
+      label: selectedFolders.length > 1
+        ? `Calculate size of ${selectedFolders.length} folders`
+        : "Calculate Size",
+      onSelect: () => selectedFolders.forEach(calculateFolderSize),
+    });
+  }
+  items.push({ separator: true });
+  items.push({
+    label: count > 1 ? `Delete ${count} items` : "Delete",
+    onSelect: deleteSelected,
+  });
+
+  showContextMenu(ev.clientX, ev.clientY, items);
 }
 
 function showContextMenu(x, y, items) {
@@ -538,6 +560,31 @@ async function saveSelectedTo() {
       break;
     }
   }
+}
+
+// Recursively total a folder's size (Finder's "Calculate Size"). The row's
+// Size cell shows "Calculating…" while the dir_size call runs, then the byte
+// total. The result lives in folderSizeState keyed by object_id so a re-render
+// (sort, another folder finishing) keeps it; refreshList wipes it. Folders can
+// be sized concurrently — each call repaints only if we're still in the folder
+// it was started from, so a result that lands after the user navigated away is
+// dropped rather than written into the wrong listing.
+async function calculateFolderSize(entry) {
+  if (folderSizeState.get(entry.object_id) === "calculating") return;
+  const startedCwd = cwd;
+  const path = pathFor(entry.name);
+  folderSizeState.set(entry.object_id, "calculating");
+  renderList();
+  try {
+    const bytes = await window.api.invoke("dir_size", { path });
+    if (cwd !== startedCwd) return;
+    folderSizeState.set(entry.object_id, bytes);
+  } catch (err) {
+    console.error("dir_size failed", path, err);
+    if (cwd === startedCwd) folderSizeState.delete(entry.object_id);
+    alert(`Couldn't calculate the size of ${entry.name}:\n\n${err}`);
+  }
+  if (cwd === startedCwd) renderList();
 }
 
 // ---------------------------------------------------------------------------
@@ -712,6 +759,15 @@ function humanSize(n) {
 function formatModified(epochSecs) {
   if (!epochSecs) return "—";
   return new Date(epochSecs * 1000).toLocaleString(undefined, { timeZone: "UTC" });
+}
+
+// Size-column text for a folder row. Folders have no size until the user asks
+// for one via "Calculate Size" (see calculateFolderSize); until then, "—".
+function folderSizeLabel(e) {
+  const s = folderSizeState.get(e.object_id);
+  if (s === "calculating") return "Calculating…";
+  if (typeof s === "number") return humanSize(s);
+  return "—";
 }
 
 deviceChip.addEventListener("click", toggleDeviceMenu);

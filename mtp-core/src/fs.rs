@@ -41,6 +41,15 @@ pub trait Fs: Send + Sync {
     fn exists(&self, path: &TPath) -> Result<bool>;
     fn storage_info(&self) -> Option<StorageInfo>;
 
+    /// Total size in bytes of every file beneath `path`, recursively. `path`
+    /// must name a directory; the directories themselves contribute nothing.
+    ///
+    /// This walks the whole subtree with one metadata round-trip per object,
+    /// so it can be slow for large trees — it's meant as an explicit,
+    /// on-demand action (a "Calculate Size" menu item), not something to run
+    /// during a normal listing.
+    fn dir_size(&self, path: &TPath) -> Result<u64>;
+
     /// Download `path` to a local file. Used by the drag-out promise callback.
     fn download_to(&self, path: &TPath, dest: &Path) -> Result<()>;
 

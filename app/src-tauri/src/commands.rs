@@ -67,6 +67,14 @@ pub fn list_dir(path: String, state: State<AppState>) -> Result<Vec<Entry>, Stri
     state.with_fs(|fs| fs.list(&TPath::parse(&path))).map_err(err)
 }
 
+/// Recursive byte total of a folder, for the "Calculate Size" menu action.
+/// Potentially slow (one round-trip per object); serialized behind the session
+/// lock like every other op, so it blocks concurrent MTP calls while it runs.
+#[tauri::command]
+pub fn dir_size(path: String, state: State<AppState>) -> Result<u64, String> {
+    state.with_fs(|fs| fs.dir_size(&TPath::parse(&path))).map_err(err)
+}
+
 #[tauri::command]
 pub fn storage_info(state: State<AppState>) -> Result<Option<StorageInfo>, String> {
     state.with_fs(|fs| Ok(fs.storage_info())).map_err(err)
