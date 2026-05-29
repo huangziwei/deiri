@@ -959,6 +959,81 @@ document.querySelectorAll("thead th").forEach((th) => {
 });
 
 // ---------------------------------------------------------------------------
+// Resizable columns
+//
+// Columns auto-size to content by default (table-layout: auto — the nice
+// default you get for free). The first drag of a divider freezes the current
+// Size/Date widths into pixels and switches to table-layout: fixed so widths
+// are honored exactly; Name is left without an explicit width, so it stays the
+// flexible column that absorbs the remainder (rows always fill the width — no
+// blank gap, no horizontal scroll). Widths live on the static <thead>, so they
+// persist across re-renders and folders. Double-click a divider to reset.
+
+const MIN_COL = 48;  // px floor for a resizable column
+const MIN_NAME = 80; // px floor for the absorbing Name column
+
+function initColumnResize() {
+  const ths = listEl.querySelectorAll("thead th");
+  if (ths.length < 3) return;
+  const [nameTh, sizeTh, dateTh] = ths;
+  addColResizer(nameTh, "name-size", sizeTh, dateTh); // Name│Size boundary
+  addColResizer(sizeTh, "size-date", sizeTh, dateTh); // Size│Date boundary
+}
+
+// Freeze the current auto widths into explicit pixels and lock table-layout, so
+// dragging is precise. No-op once already frozen (until a double-click reset).
+function freezeColumns(sizeTh, dateTh) {
+  if (listEl.style.tableLayout === "fixed") return;
+  sizeTh.style.width = `${sizeTh.getBoundingClientRect().width}px`;
+  dateTh.style.width = `${dateTh.getBoundingClientRect().width}px`;
+  listEl.style.tableLayout = "fixed";
+}
+
+function addColResizer(th, boundary, sizeTh, dateTh) {
+  const grip = document.createElement("span");
+  grip.className = "col-resizer";
+  grip.addEventListener("click", (ev) => ev.stopPropagation()); // a bare click mustn't sort
+  grip.addEventListener("dblclick", (ev) => {
+    ev.stopPropagation();
+    sizeTh.style.width = "";
+    dateTh.style.width = "";
+    listEl.style.tableLayout = ""; // back to the content-sized auto default
+  });
+  grip.addEventListener("mousedown", (ev) => {
+    ev.preventDefault(); // no text selection / native drag
+    freezeColumns(sizeTh, dateTh);
+    const startX = ev.clientX;
+    const sizeW0 = sizeTh.getBoundingClientRect().width;
+    const dateW0 = dateTh.getBoundingClientRect().width;
+    const tableW = listEl.getBoundingClientRect().width;
+    document.body.classList.add("col-resizing");
+
+    const onMove = (e) => {
+      const dx = e.clientX - startX;
+      if (boundary === "name-size") {
+        // Drag right → Name grows, Size shrinks (Name absorbs). Keep Name ≥ min.
+        const maxSize = tableW - dateW0 - MIN_NAME;
+        sizeTh.style.width = `${Math.max(MIN_COL, Math.min(sizeW0 - dx, maxSize))}px`;
+      } else {
+        // Trade width between Size and Date; Name is unaffected.
+        const total = sizeW0 + dateW0;
+        const w = Math.max(MIN_COL, Math.min(sizeW0 + dx, total - MIN_COL));
+        sizeTh.style.width = `${w}px`;
+        dateTh.style.width = `${total - w}px`;
+      }
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.classList.remove("col-resizing");
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+  th.appendChild(grip);
+}
+
+// ---------------------------------------------------------------------------
 // Storage info
 
 async function refreshStorage() {
@@ -1088,4 +1163,5 @@ function setViewMode(mode) {
 // Boot
 
 updateNavButtons(); // disabled until a device opens and seeds history
+initColumnResize();
 refreshDevices({ autoOpen: true });

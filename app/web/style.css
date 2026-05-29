@@ -292,12 +292,36 @@ th {
   cursor: pointer;
   font-weight: 500;
   z-index: 1;
+  /* Clip the header label when a column is dragged narrower than its text. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 tbody tr { cursor: default; }
 tbody tr:hover td { background: #f0f6ff; }
 tbody tr.selected td { background: #d0e3ff; }
 .cell-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cell-size, .cell-modified { color: #666; white-space: nowrap; }
+.cell-size, .cell-modified {
+  color: #666;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Column resize grips — a thin col-resize zone on the right edge of a header.
+   Anchored by the th's sticky positioning (sticky establishes a containing
+   block, so no extra position:relative is needed). */
+.col-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+}
+.col-resizer:hover { box-shadow: inset -2px 0 0 #2c7dff; }
+body.col-resizing { cursor: col-resize; }
 #empty {
   padding: 32px;
   text-align: center;
