@@ -181,6 +181,38 @@ header {
   min-height: 24px;
 }
 
+/* Format filter pills — derived from the current folder's file types. Take the
+   flexible middle of the header; scroll horizontally if a folder has many. */
+#filter-pills {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none; /* Firefox */
+}
+#filter-pills::-webkit-scrollbar { display: none; }
+.filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 10px;
+  border: 1px solid #d0d0d4;
+  border-radius: 999px;
+  background: #fff;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  color: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.filter-pill:hover { background: #f0f0f4; }
+.filter-pill.active { background: #2c7dff; border-color: #2c7dff; color: #fff; }
+.filter-pill .pill-count { opacity: 0.55; font-size: 11px; }
+.filter-pill.active .pill-count { opacity: 0.85; }
+
 /* View toggle ------------------------------------------------------------- */
 #view-toggle { display: flex; gap: 2px; margin-left: auto; }
 #view-toggle button {
@@ -350,6 +382,9 @@ tbody tr.selected td { background: #d0e3ff; }
   .cell-size, .cell-modified { color: #999; }
   #view-toggle button { background: #2c2c30; border-color: #44444a; color: inherit; }
   #view-toggle button.active { background: #2c4474; }
+  .filter-pill { background: #2c2c30; border-color: #44444a; color: inherit; }
+  .filter-pill:hover { background: #34343a; }
+  .filter-pill.active { background: #2c5fb0; border-color: #2c5fb0; color: #fff; }
   .tile:hover { background: #2a3340; }
   .tile.selected { background: #2c4474; }
   .tile-thumb { background: #2c2c30; color: #666; }

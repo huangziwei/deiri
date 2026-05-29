@@ -21,6 +21,7 @@ const dropzone = $("dropzone-overlay");
 const contextMenu = $("context-menu");
 const navBackBtn = $("nav-back");
 const navForwardBtn = $("nav-forward");
+const filterPillsEl = $("filter-pills");
 const viewListBtn = $("view-list");
 const viewGridBtn = $("view-grid");
 
@@ -29,10 +30,19 @@ const viewGridBtn = $("view-grid");
 
 let openDeviceId = null;
 let cwd = ""; // device-relative, no leading slash
+// `allEntries` is the full listing from the device; `entries` is the
+// filtered-and-sorted view that's actually rendered and index-addressed (so
+// selection, shift-range, ⌘A, etc. all operate on what's visible). `entries`
+// is derived from `allEntries` via the active format pills — see applyFilter.
+let allEntries = [];
 let entries = [];
 let sortKey = "name";
 let sortDir = "asc";
 let viewMode = "list"; // "list" or "grid"
+
+// Active format-filter pills (lowercased extensions; "" = no-extension files).
+// Empty set means "show everything". Reset on navigation. See renderFilterPills.
+const activeFilters = new Set();
 
 // Finder-style back/forward navigation. `navHistory` is the stack of visited
 // cwd values; `navIndex` points at the current one. New navigation truncates
@@ -288,14 +298,89 @@ async function refreshList() {
     if (v.size === "calculating") folderSizeState.delete(id);
   }
   sizeQueue.length = 0; // drop pending size work for the folder we're leaving
+  activeFilters.clear(); // format filter is per-listing; reset on navigation
   if (!openDeviceId) {
+    allEntries = [];
     entries = [];
+    renderFilterPills();
     renderList();
     return;
   }
-  entries = await window.api.invoke("list_dir", { path: cwd });
-  renderList();
+  allEntries = await window.api.invoke("list_dir", { path: cwd });
+  renderFilterPills(); // pills reflect the formats in this folder
+  applyFilter();       // derives `entries` from `allEntries` and renders
   renderBreadcrumb();
+}
+
+// ---------------------------------------------------------------------------
+// Format filter (pills)
+
+// File extension, lowercased, "" for none. A leading dot (".sync") is a dotfile
+// name, not an extension — hence `dot > 0` rather than `>= 0`.
+function extOf(name) {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
+// Distinct file extensions in the current folder with their counts, most common
+// first. Folders don't have a format, so they're excluded.
+function availableFormats() {
+  const counts = new Map();
+  for (const e of allEntries) {
+    if (e.is_dir) continue;
+    const ext = extOf(e.name);
+    counts.set(ext, (counts.get(ext) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([ext, count]) => ({ ext, count }))
+    .sort((a, b) => b.count - a.count || a.ext.localeCompare(b.ext));
+}
+
+function renderFilterPills() {
+  filterPillsEl.innerHTML = "";
+  if (!openDeviceId) return;
+  const formats = availableFormats();
+  // Nothing to choose between with 0 or 1 file type — filtering would be a
+  // no-op, so keep the bar clean (this hides pills in all-JPG camera folders
+  // and folder-only listings).
+  if (formats.length < 2) return;
+
+  for (const { ext, count } of formats) {
+    const pill = document.createElement("button");
+    pill.type = "button";
+    pill.className = "filter-pill";
+    if (activeFilters.has(ext)) pill.classList.add("active");
+    const label = document.createElement("span");
+    label.className = "pill-label";
+    label.textContent = ext === "" ? "No ext" : ext.toUpperCase();
+    const cnt = document.createElement("span");
+    cnt.className = "pill-count";
+    cnt.textContent = count;
+    pill.append(label, cnt);
+    pill.addEventListener("click", () => toggleFilter(ext));
+    filterPillsEl.appendChild(pill);
+  }
+}
+
+function toggleFilter(ext) {
+  if (activeFilters.has(ext)) activeFilters.delete(ext);
+  else activeFilters.add(ext);
+  // The current selection was made against the old view; clear it so we don't
+  // act on rows that just got filtered out.
+  selected.clear();
+  anchorIndex = -1;
+  renderFilterPills(); // refresh active states
+  applyFilter();
+}
+
+// Derive the rendered `entries` from `allEntries`. Folders always pass (they're
+// navigation, not a format); files pass when no filter is set or their format
+// is among the active pills.
+function applyFilter() {
+  entries = activeFilters.size === 0
+    ? allEntries.slice()
+    : allEntries.filter((e) => e.is_dir || activeFilters.has(extOf(e.name)));
+  renderList();
 }
 
 // Size used for the "size" sort. Files use their real size. Folders have none
@@ -328,7 +413,7 @@ function renderList() {
   renderGen++;
 
   if (entries.length === 0 && openDeviceId) {
-    emptyEl.textContent = "Empty folder.";
+    emptyEl.textContent = activeFilters.size > 0 ? "No items match the filter." : "Empty folder.";
     emptyEl.hidden = false;
   } else {
     emptyEl.hidden = entries.length > 0 || !!openDeviceId;
@@ -891,11 +976,17 @@ function updateStatusBar() {
     statusEl.textContent = "";
     return;
   }
-  const total = entries.length;
+  const shown = entries.length;     // visible (after filter)
+  const total = allEntries.length;  // everything in the folder
   const sel = selected.size;
-  const count = sel > 0
-    ? `${sel} of ${total} selected`
-    : `${total} ${total === 1 ? "item" : "items"}`;
+  let count;
+  if (sel > 0) {
+    count = `${sel} of ${shown} selected`;
+  } else if (activeFilters.size > 0 && shown !== total) {
+    count = `${shown} of ${total} items`; // filtered down
+  } else {
+    count = `${shown} ${shown === 1 ? "item" : "items"}`;
+  }
   statusEl.textContent = storageText ? `${count}  ·  ${storageText}` : count;
 }
 
