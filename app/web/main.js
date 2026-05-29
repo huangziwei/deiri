@@ -264,9 +264,7 @@ function renderListView() {
     sizeTd.textContent = e.is_dir ? "—" : humanSize(e.size ?? 0);
     const modTd = document.createElement("td");
     modTd.className = "cell-modified";
-    modTd.textContent = e.modified_at
-      ? new Date(e.modified_at * 1000).toLocaleString()
-      : "—";
+    modTd.textContent = formatModified(e.modified_at);
 
     tr.append(nameTd, sizeTd, modTd);
 
@@ -704,6 +702,16 @@ function humanSize(n) {
   let i = 0;
   while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
   return `${i === 0 ? n.toFixed(0) : n.toFixed(1)} ${units[i]}`;
+}
+
+// modified_at is the device's recorded wall-clock encoded as a UTC-based epoch
+// (the device gives no usable timezone — see datetime_to_unix in mtp-core). We
+// must render it back in UTC so the user sees exactly what the device wrote;
+// using the local zone here would re-shift every timestamp by the viewer's
+// offset. Returns "—" for entries with no date (e.g. folders).
+function formatModified(epochSecs) {
+  if (!epochSecs) return "—";
+  return new Date(epochSecs * 1000).toLocaleString(undefined, { timeZone: "UTC" });
 }
 
 deviceChip.addEventListener("click", toggleDeviceMenu);
