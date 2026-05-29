@@ -68,6 +68,15 @@ async function refreshDevices({ autoOpen = false } = {}) {
     devices = [];
   }
   lastDevices = devices;
+
+  // If the device we had open vanished from the bus (unplugged or ejected),
+  // tear down the session so its now-stale listing doesn't linger. This runs
+  // on window focus, which fires right when the user returns after pulling
+  // the cable, so it's the natural place to notice.
+  if (openDeviceId && !devices.some((d) => d.id === openDeviceId)) {
+    await clearOpenDevice();
+  }
+
   updateDeviceChip();
   // If the menu is open, re-render so a hot-plug shows up immediately.
   if (!deviceMenu.hidden) renderDeviceMenu();
@@ -169,6 +178,26 @@ async function openDevice(d) {
   emptyEl.hidden = true;
   updateDeviceChip();
   await Promise.all([refreshList(), refreshStorage()]);
+}
+
+// Tear down all open-device state — the inverse of openDevice(). Called when
+// the active device leaves the bus (unplugged or ejected). Drops the backend
+// session and resets the view to its empty state so a stale listing from the
+// gone device doesn't linger on screen. `openDeviceId` is nulled BEFORE
+// refreshList() so that call short-circuits to an empty render instead of
+// hitting list_dir against a dead session.
+async function clearOpenDevice() {
+  openDeviceId = null;
+  cwd = "";
+  try {
+    await window.api.invoke("close_device");
+  } catch (err) {
+    console.error("close_device failed", err);
+  }
+  updateDeviceChip();
+  await refreshList();
+  renderBreadcrumb(); // reset to just "Device" (refreshList skips it when no device)
+  storageEl.textContent = "";
 }
 
 // ---------------------------------------------------------------------------
