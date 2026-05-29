@@ -6,6 +6,13 @@ A macOS app for getting files in and out of MTP devices (newer Kindles, Android 
 
 Built with [Tauri](https://tauri.app/) on top of [`mtp-rs`](https://crates.io/crates/mtp-rs).
 
+## Screenshots
+
+<p align="center">
+  <img src=".github/assets/view-list.png" height="300" />
+  <img src=".github/assets/view-grid.png" height="300" />
+</p>
+
 ## Build
 
 ```sh
