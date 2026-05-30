@@ -452,13 +452,13 @@ function toggleFilter(ext) {
   applyFilter();
 }
 
-// Derive the rendered `entries` from `allEntries`. Folders always pass (they're
-// navigation, not a format); files pass when no filter is set or their format
-// is among the active pills.
+// Derive the rendered `entries` from `allEntries`. With no filter, show
+// everything. When a format filter is active, hide folders too — "show me PDFs"
+// shouldn't leave subfolders cluttering the view; only matching files pass.
 function applyFilter() {
   entries = activeFilters.size === 0
     ? allEntries.slice()
-    : allEntries.filter((e) => e.is_dir || activeFilters.has(extOf(e.name)));
+    : allEntries.filter((e) => !e.is_dir && activeFilters.has(extOf(e.name)));
   renderList();
 }
 
