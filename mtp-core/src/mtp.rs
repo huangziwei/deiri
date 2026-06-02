@@ -549,13 +549,20 @@ impl Fs for MtpFs {
             let mut to_delete: Vec<ObjectHandle> = Vec::new();
             while let Some(h) = stack.pop() {
                 to_delete.push(h);
+                // Enumerate children by HANDLE only. A delete walk needs handles,
+                // not metadata — and `list_objects` fetches GetObjectInfo per child.
+                // Some Kindle objects (KFX/KPP render-cache resources under a book's
+                // `.sdr`) return an empty GetObjectInfo data phase, which fails
+                // ObjectInfo parsing ("insufficient bytes for u32") and would abort
+                // the whole delete. `get_object_handles` doesn't read metadata, so it
+                // walks them fine. Recurse on every handle; files return no children.
                 let children = self
-                    .storage
-                    .list_objects(Some(h))
+                    .device
+                    .get_object_handles(self.storage.id(), Some(h))
                     .await
                     .map_err(map_err)?;
-                for child in children {
-                    stack.push(child.handle);
+                for ch in children {
+                    stack.push(ch);
                 }
             }
             for h in to_delete.into_iter().rev() {
