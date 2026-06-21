@@ -335,6 +335,21 @@ tbody tr { cursor: default; }
 tbody tr:hover td { background: #f0f6ff; }
 tbody tr.selected td { background: #d0e3ff; }
 .cell-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Inline rename field (see beginRename). Fills the name cell/tile so the text
+   doesn't jump when the label is swapped for the input. */
+.rename-input {
+  font: inherit;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0 3px;
+  border: 1px solid #0066cc;
+  border-radius: 3px;
+  background: #fff;
+  color: #111;
+  outline: none;
+}
+.tile-name .rename-input { text-align: center; }
 .cell-size, .cell-modified {
   color: #666;
   white-space: nowrap;
@@ -429,6 +444,7 @@ body.col-resizing { cursor: col-resize; }
   #device-chip { background: #2c2c30; border-color: #44444a; color: inherit; }
   #device-chip:hover { background: #34343a; }
   #device-rename { background: #1e1e20; border-color: #2c7dff; color: inherit; }
+  .rename-input { background: #1e1e20; border-color: #2c7dff; color: #e8e8ea; }
   #device-chip.is-open { background: #3a3a40; }
   #device-menu { background: #2e2e32; border-color: #44444a; box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.5); }
   .device-menu-item:hover { background: #34343a; }

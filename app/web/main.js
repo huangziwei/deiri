@@ -674,6 +674,10 @@ function onRowContextMenu(idx, ev) {
       onSelect: saveSelectedTo,
     },
   ];
+  // Rename is a single-item action (in-place device rename).
+  if (count === 1) {
+    items.push({ label: "Rename", onSelect: () => beginRename(idx) });
+  }
   // Recursive folder sizing only has somewhere to show in the list view, so
   // only offer it there. Acts on the folders in the selection; any files are
   // left alone (they already show a size).
@@ -825,6 +829,90 @@ async function saveSelectedTo() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Rename (inline)
+//
+// Finder-style: swap the name cell/tile label for a text field, commit on
+// Enter or blur, cancel on Escape. The backend `rename` is a device-side
+// in-place rename (PTP SetObjectPropValue) — see commands::rename.
+
+// Visible index of the single selected entry, or -1 if not exactly one.
+function singleSelectedIndex() {
+  if (selected.size !== 1) return -1;
+  return entries.findIndex((e) => selected.has(pathFor(e.name)));
+}
+
+function beginRename(idx) {
+  const entry = entries[idx];
+  if (!entry) return;
+  hideContextMenu();
+  const container = viewMode === "list"
+    ? listBody.querySelector(`tr[data-idx="${idx}"] .cell-name`)
+    : gridEl.querySelector(`.tile[data-idx="${idx}"] .tile-name`);
+  if (!container) return;
+
+  container.textContent = "";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "rename-input";
+  input.value = entry.name;
+  input.spellcheck = false;
+  container.appendChild(input);
+  input.focus();
+  selectStem(input, entry);
+
+  // `blur` fires when the field is removed on commit/cancel, so guard against
+  // running twice.
+  let settled = false;
+  const commit = () => {
+    if (settled) return;
+    settled = true;
+    applyRename(entry, input.value.trim());
+  };
+  const cancel = () => {
+    if (settled) return;
+    settled = true;
+    renderList(); // restore the original cell
+  };
+  input.addEventListener("keydown", (ev) => {
+    ev.stopPropagation(); // keep ⌘A / Delete / arrows out of the global handler
+    if (ev.key === "Enter") { ev.preventDefault(); commit(); }
+    else if (ev.key === "Escape") { ev.preventDefault(); cancel(); }
+  });
+  input.addEventListener("blur", commit);
+}
+
+// Preselect the basename without its extension (Finder-style) so retyping the
+// stem is one action. Folders and extensionless names select fully.
+function selectStem(input, entry) {
+  const dot = entry.name.lastIndexOf(".");
+  if (!entry.is_dir && dot > 0) input.setSelectionRange(0, dot);
+  else input.select();
+}
+
+async function applyRename(entry, newName) {
+  if (!newName || newName === entry.name) { renderList(); return; }
+  if (newName.includes("/")) {
+    alert('A name can\'t contain "/".');
+    renderList();
+    return;
+  }
+  const path = pathFor(entry.name);
+  try {
+    await window.api.invoke("rename", { args: { path, new_name: newName } });
+  } catch (err) {
+    console.error("rename failed", path, err);
+    alert(`Couldn't rename ${entry.name}:\n\n${err}`);
+    renderList();
+    return;
+  }
+  await refreshList();
+  // Keep the renamed item selected under its new name.
+  selected.clear();
+  selected.add(pathFor(newName));
+  updateSelectionDOM();
+}
+
 // Recursively total folders' sizes (Finder's "Calculate Size"). Each row's Size
 // cell shows "Calculating…" then the byte total. Results live in folderSizeState
 // keyed by object_id so a re-render (sort, view switch) keeps them; refreshList
@@ -956,6 +1044,13 @@ document.addEventListener("keydown", (ev) => {
     if (selected.size === 0) return;
     ev.preventDefault();
     deleteSelected();
+  } else if (ev.key === "Enter") {
+    // Finder's rename shortcut: edit the single selected item in place.
+    const idx = singleSelectedIndex();
+    if (idx >= 0) {
+      ev.preventDefault();
+      beginRename(idx);
+    }
   } else if (ev.key === "Escape") {
     hideContextMenu();
     hideDeviceMenu();

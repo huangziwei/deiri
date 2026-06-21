@@ -22,7 +22,7 @@ use futures::StreamExt;
 use futures::executor::block_on;
 use mtp_rs::mtp::{MtpDevice, NewObjectInfo, Storage};
 use mtp_rs::ptp::{
-    unpack_string, DateTime, ObjectHandle, ObjectInfo, ObjectPropertyCode, PtpSession,
+    unpack_string, DateTime, ObjectHandle, ObjectInfo, ObjectPropertyCode, PtpSession, ResponseCode,
 };
 
 use crate::fs::{Entry, FolderSize, Fs, StorageInfo};
@@ -584,14 +584,6 @@ impl Fs for MtpFs {
         })
     }
 
-    fn rename(&self, _from: &TPath, _to: &TPath) -> Result<()> {
-        // PTP `SetObjectPropValue` on `ObjectFilename` (prop 0xDC07). mtp-rs
-        // 0.15 doesn't expose a typed wrapper yet — would need either a
-        // raw-PTP fallback or a patch upstream. Stubbed until a user actually
-        // triggers a rename from the UI.
-        Err(anyhow!("rename: not implemented yet"))
-    }
-
     fn move_to(&self, from: &TPath, dest_dir: &TPath) -> Result<()> {
         let _g = self.op_lock.lock().expect("op_lock poisoned");
         block_on(async {
@@ -637,11 +629,84 @@ impl Fs for MtpFs {
             self.storage
                 .move_object(handle, new_parent, None)
                 .await
-                .map_err(map_err)
-                .with_context(|| format!("move {from} -> {dest_dir}"))?;
+                .map_err(|e| move_refusal(e, name))?;
             Ok(())
         })
     }
+
+    fn rename(&self, from: &TPath, to: &TPath) -> Result<()> {
+        let _g = self.op_lock.lock().expect("op_lock poisoned");
+        block_on(async {
+            let new_name = to.name().ok_or_else(|| anyhow!("rename: empty new name"))?;
+            // The trait shape allows an arbitrary `to`, but a rename only
+            // changes the leaf name — the parent must match. (The command layer
+            // builds `to` this way; guard in case another caller doesn't.)
+            if from.parent() != to.parent() {
+                return Err(anyhow!("rename can only change the name, not the folder"));
+            }
+            if from.name() == Some(new_name) {
+                return Ok(()); // unchanged
+            }
+            // SetObjectPropValue(ObjectFileName) is optional in PTP; check the
+            // device advertises it so we fail with a clear message rather than
+            // a bare protocol error.
+            if !self.device.supports_rename() {
+                return Err(anyhow!("this device doesn't support renaming over MTP"));
+            }
+
+            let handle = self
+                .resolve(from)
+                .await?
+                .ok_or_else(|| anyhow!("rename: object not found at `{from}`"))?;
+
+            // Refuse to collide with an existing sibling. The object being
+            // renamed still carries its OLD name here, so a match on `new_name`
+            // is always a different object.
+            let parent = from.parent().unwrap_or_default();
+            let parent_handle = if parent.is_empty() {
+                None
+            } else {
+                self.resolve(&parent).await?
+            };
+            let siblings = self.storage.list_objects(parent_handle).await.map_err(map_err)?;
+            if siblings.iter().any(|o| o.filename == new_name) {
+                return Err(anyhow!("`{new_name}` already exists in this folder"));
+            }
+
+            self.storage
+                .rename(handle, new_name)
+                .await
+                .map_err(map_err)
+                .with_context(|| format!("rename {from} -> {new_name}"))?;
+            Ok(())
+        })
+    }
+}
+
+/// Turn a refused `MoveObject` into a message a user can act on. PTP answers a
+/// rejected move with a terse response code; for the cases that mean "the
+/// firmware won't relocate this" (managed system folders, read-only stores,
+/// or a device that doesn't implement the operation) we say so plainly instead
+/// of surfacing a bare "GeneralError". Other errors fall back to [`map_err`].
+fn move_refusal(e: mtp_rs::Error, name: &str) -> anyhow::Error {
+    if let Some(code) = e.response_code() {
+        if matches!(
+            code,
+            ResponseCode::GeneralError
+                | ResponseCode::OperationNotSupported
+                | ResponseCode::AccessDenied
+                | ResponseCode::ObjectWriteProtected
+                | ResponseCode::StoreReadOnly
+                | ResponseCode::InvalidParentObject
+        ) {
+            return anyhow!(
+                "the device wouldn't move \"{name}\" — some items (Kindle system \
+                 folders, read-only storage, and on some devices any folder) \
+                 can't be relocated over MTP"
+            );
+        }
+    }
+    map_err(e)
 }
 
 fn map_err(err: mtp_rs::Error) -> anyhow::Error {

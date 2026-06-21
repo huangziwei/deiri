@@ -187,6 +187,34 @@ pub async fn move_object(args: MoveArgs, state: State<'_, AppState>) -> Result<(
     state.with_fs(|fs| fs.move_to(&from, &dest_dir)).map_err(err)
 }
 
+#[derive(Deserialize)]
+pub struct RenameArgs {
+    /// Object to rename (device-relative path).
+    pub path: String,
+    /// New leaf name (no path separators).
+    pub new_name: String,
+}
+
+/// Rename a file or folder in place (device-side PTP SetObjectPropValue on the
+/// ObjectFileName property — see [`Fs::rename`]). Rejects empty names, names
+/// containing `/`, and renaming the device root.
+#[tauri::command]
+pub async fn rename(args: RenameArgs, state: State<'_, AppState>) -> Result<(), String> {
+    let from = TPath::parse(&args.path);
+    let name = args.new_name.trim();
+    if name.is_empty() {
+        return Err("Name can't be empty.".to_string());
+    }
+    if name.contains('/') {
+        return Err("A name can't contain \"/\".".to_string());
+    }
+    let parent = from
+        .parent()
+        .ok_or_else(|| "Can't rename the device root.".to_string())?;
+    let to = parent.join(name);
+    state.with_fs(|fs| fs.rename(&from, &to)).map_err(err)
+}
+
 // --------------------------------------------------------------------------
 // Dialog wrappers.
 //

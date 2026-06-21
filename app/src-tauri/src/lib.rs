@@ -38,6 +38,7 @@ pub fn run() {
         commands::delete,
         commands::create_dir,
         commands::move_object,
+        commands::rename,
         commands::pick_folder,
         commands::confirm_dialog,
         file_promise::drag_arm,
@@ -57,6 +58,7 @@ pub fn run() {
         commands::delete,
         commands::create_dir,
         commands::move_object,
+        commands::rename,
         commands::pick_folder,
         commands::confirm_dialog,
     ]);
