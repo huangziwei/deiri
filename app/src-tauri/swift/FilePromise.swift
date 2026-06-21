@@ -215,21 +215,38 @@ private func startDrag(view: NSView, downEvent: NSEvent, payload: PendingDrag) {
 
 // MARK: - In-window drag tracking
 
-// Convert a drag screen point into the WebView's client coordinates (CSS px,
-// top-left origin) and hand it to Rust via the position callback. No-op if no
-// drag is active. `convertFromScreen(_:)` (NSRect form) is used instead of the
-// macOS 14+ `convertPoint(fromScreen:)` so this compiles at the 11.0 Swift
-// deployment target the build uses.
-private func reportDragPosition(_ screenPoint: NSPoint, phase: Int32) {
+// Convert the live cursor position into the WebView's client coordinates (CSS
+// px, top-left origin) and hand it to Rust via the position callback. No-op if
+// no drag is active.
+//
+// Two corrections make the reported point land exactly under the pointer:
+//
+//   1. We read `NSEvent.mouseLocation` rather than the screenPoint AppKit
+//      passes the drag-source callbacks. That callback point tracks the drag
+//      image's frame origin — about half an icon below-left of the pointer — so
+//      mapping it put every reported point ~16px below the cursor.
+//
+//   2. We flip against `contentLayoutRect.maxY`, not the full content-view
+//      height. Wry's web content fills the area BELOW the titlebar (the
+//      contentLayoutRect); the web view's own frame is coincident with the
+//      content view, so the titlebar inset lives only in contentLayoutRect.
+//      Flipping against the whole content view overshot by the titlebar height
+//      (~28px) and a crumb only lit when the cursor hovered that far above it.
+//
+// `convertFromScreen(_:)` (NSRect form) is used instead of the macOS 14+
+// `convertPoint(fromScreen:)` so this compiles at the 11.0 deployment target.
+private func reportDragPosition(phase: Int32) {
     let s = FilePromiseState.shared
     guard let position = s.position,
           let window = s.dragWindow,
           let content = window.contentView,
           let path = s.dragObjectPath else { return }
-    let winPoint = window.convertFromScreen(NSRect(origin: screenPoint, size: .zero)).origin
-    let viewPoint = content.convert(winPoint, from: nil) // window → content view (bottom-left)
-    let clientX = Double(viewPoint.x)
-    let clientY = Double(content.bounds.height - viewPoint.y) // flip to top-left origin
+    let cursor = NSEvent.mouseLocation
+    let winPoint = window.convertFromScreen(NSRect(origin: cursor, size: .zero)).origin
+    let viewPoint = content.convert(winPoint, from: nil) // window base → content view
+    let layout = window.contentLayoutRect // web viewport = area below the titlebar
+    let clientX = Double(viewPoint.x - layout.minX)
+    let clientY = Double(layout.maxY - viewPoint.y) // flip to top-left origin
     path.withCString { ptr in
         position(ptr, clientX, clientY, phase)
     }
@@ -327,7 +344,7 @@ private final class DragSource: NSObject, NSDraggingSource {
             return
         }
         s.lastEmit = screenPoint
-        reportDragPosition(screenPoint, phase: 1)
+        reportDragPosition(phase: 1)
     }
 
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
@@ -338,7 +355,7 @@ private final class DragSource: NSObject, NSDraggingSource {
         // outside the window (no crumb there, so JS won't move), while a drop
         // on a crumb may report a non-empty operation if Wry's webview claims
         // the drag — gating on `operation` would wrongly suppress that move.
-        reportDragPosition(screenPoint, phase: 2)
+        reportDragPosition(phase: 2)
 
         // Drop strong refs to the delegates that backed this session and the
         // per-drag tracking state. We only run one drag at a time, so clearing

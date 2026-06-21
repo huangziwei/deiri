@@ -352,6 +352,16 @@ tbody tr:hover td { background: #f0f6ff; }
 tbody tr.selected td { background: #d0e3ff; }
 .cell-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* Drop-into-folder highlight: dragging a row onto a folder row/tile (or a
+   breadcrumb crumb) lights the target with the same blue fill, so "this is
+   where it lands" reads identically wherever you aim. The id prefixes keep it
+   ahead of the selection/hover rules — including their dark-mode re-declares —
+   so a folder that's both selected and the drop target still reads as the
+   target. */
+#list-body tr.drop-target-active td { background: #0066cc; color: #fff; }
+#grid .tile.drop-target-active { background: #0066cc; }
+#grid .tile.drop-target-active .tile-name { color: #fff; }
+
 /* Inline rename field (see beginRename). Fills the name cell/tile so the text
    doesn't jump when the label is swapped for the input. */
 .rename-input {
