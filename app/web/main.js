@@ -15,6 +15,8 @@ const deviceMenu = $("device-menu");
 const breadcrumbEl = $("breadcrumb");
 const pathBar = document.querySelector(".path-bar");
 const statusEl = $("status");
+const newFolderBtn = $("new-folder-btn");
+const listContainer = $("list-container");
 const listEl = $("list");
 const listBody = $("list-body");
 const gridEl = $("grid");
@@ -161,6 +163,8 @@ function updateDeviceChip() {
   // The chip body now navigates to the device root; the ▾ switches devices.
   deviceChip.title = open ? "Go to device root" : "Pick a device";
   deviceChip.classList.toggle("no-device", !open);
+  // Folder creation needs a session to target; gate it on an open device.
+  newFolderBtn.disabled = !openDeviceId;
 }
 
 function renderDeviceMenu() {
@@ -698,6 +702,20 @@ function onRowContextMenu(idx, ev) {
   showContextMenu(ev.clientX, ev.clientY, items);
 }
 
+// Right-clicking empty space in the listing (Finder's "New Folder" gesture).
+// Rows and tiles carry their own menu (onRowContextMenu) and the sortable
+// column headers their own click behavior, so bail when the target is one of
+// those — and when no device is open there's nowhere to create a folder.
+function onEmptyContextMenu(ev) {
+  if (ev.target.closest("tr, .tile, thead")) return;
+  ev.preventDefault();
+  if (!openDeviceId) return;
+  showContextMenu(ev.clientX, ev.clientY, [
+    { label: "New Folder", onSelect: createFolder },
+  ]);
+}
+listContainer.addEventListener("contextmenu", onEmptyContextMenu);
+
 function showContextMenu(x, y, items) {
   contextMenu.innerHTML = "";
   for (const item of items) {
@@ -827,6 +845,53 @@ async function saveSelectedTo() {
       break;
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// New folder
+//
+// Finder-style: create an "untitled folder" in the current directory, then drop
+// straight into inline rename so the user can name it. The backend create_dir
+// is idempotent (it reuses an existing folder of the same name rather than
+// erroring), so we pick a name that doesn't collide with anything in the
+// listing — otherwise "New Folder" twice would silently land on the same folder.
+
+// First free "untitled folder" / "untitled folder N" name in the current
+// listing. Matched case-insensitively so we don't pick a name a case-folding
+// device would treat as a duplicate. Checks `allEntries` (the full listing),
+// not the filtered `entries`, so a folder hidden by an active format filter
+// still counts as taken.
+function uniqueUntitledName() {
+  const base = "untitled folder";
+  const taken = new Set(allEntries.map((e) => e.name.toLowerCase()));
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) {
+    const candidate = `${base} ${n}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+}
+
+async function createFolder() {
+  if (!openDeviceId) return;
+  const name = uniqueUntitledName();
+  try {
+    await window.api.invoke("create_dir", { path: pathFor(name) });
+  } catch (err) {
+    console.error("create_dir failed", name, err);
+    alert(`Couldn't create folder:\n\n${err}`);
+    return;
+  }
+  // A new folder is empty, so it adds no bytes — cached folder sizes stay
+  // valid and need no invalidation. refreshList also clears any active format
+  // filter, so the new folder is visible even if a filter was hiding folders.
+  await refreshList();
+  // Select it and open the rename field, like Finder's create-then-name flow.
+  const idx = entries.findIndex((e) => e.is_dir && e.name === name);
+  if (idx < 0) return;
+  selected.clear();
+  selected.add(pathFor(name));
+  updateSelectionDOM();
+  beginRename(idx);
 }
 
 // ---------------------------------------------------------------------------
@@ -1027,7 +1092,10 @@ document.addEventListener("keydown", (ev) => {
   const tag = ev.target?.tagName;
   if (tag === "INPUT" || tag === "TEXTAREA") return;
 
-  if ((ev.metaKey || ev.ctrlKey) && ev.key === "a") {
+  if ((ev.metaKey || ev.ctrlKey) && ev.shiftKey && ev.key.toLowerCase() === "n") {
+    ev.preventDefault(); // Finder's New Folder shortcut
+    createFolder();
+  } else if ((ev.metaKey || ev.ctrlKey) && ev.key === "a") {
     if (entries.length === 0) return;
     ev.preventDefault();
     selected.clear();
@@ -1123,6 +1191,7 @@ function renderBreadcrumb() {
 
 navBackBtn.addEventListener("click", goBack);
 navForwardBtn.addEventListener("click", goForward);
+newFolderBtn.addEventListener("click", createFolder);
 
 document.querySelectorAll("thead th").forEach((th) => {
   th.addEventListener("click", () => {

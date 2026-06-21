@@ -162,6 +162,22 @@ header {
 #nav-buttons button:hover:not(:disabled) { background: #f0f0f4; }
 #nav-buttons button:disabled { opacity: 0.35; cursor: default; }
 
+/* New Folder — a standalone icon button matching the nav/view buttons. */
+#new-folder-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #d0d0d4;
+  border-radius: 4px;
+  background: #fff;
+  padding: 2px 8px;
+  color: inherit;
+  cursor: pointer;
+}
+#new-folder-btn:hover:not(:disabled) { background: #f0f0f4; }
+#new-folder-btn:disabled { opacity: 0.35; cursor: default; }
+#new-folder-btn svg { display: block; }
+
 /* Path bar — device chip (the path root) + breadcrumb, above the status bar. */
 .path-bar {
   display: flex;
@@ -435,6 +451,8 @@ body.col-resizing { cursor: col-resize; }
   header { background: #252528; border-bottom-color: #36363a; }
   #nav-buttons button { background: #2c2c30; border-color: #44444a; color: inherit; }
   #nav-buttons button:hover:not(:disabled) { background: #34343a; }
+  #new-folder-btn { background: #2c2c30; border-color: #44444a; }
+  #new-folder-btn:hover:not(:disabled) { background: #34343a; }
   .path-bar, #status-bar { background: #252528; border-top-color: #36363a; }
   .path-bar.drag-active { background: #30303a; }
   .crumb-current { color: #cdcdd0; }
