@@ -32,6 +32,19 @@ public typealias ResolverFn = @convention(c) (
     UnsafeRawPointer?        // userCtx (opaque — Rust may use a global instead)
 ) -> Bool
 
+// Reports the live cursor position of an in-progress drag back to Rust (which
+// re-emits it to JS). The drag is a native NSDraggingSession, so the WebView
+// gets no DOM drag events — this is the only channel by which the breadcrumb
+// can track the drag and accept an in-window drop. Coordinates are already
+// converted to web client space (CSS px, top-left origin). `phase`: 1 = moved,
+// 2 = ended in-window (no external destination took it), 0 = ended externally.
+public typealias PositionFn = @convention(c) (
+    UnsafePointer<CChar>?,   // objectPath (device-relative)
+    Double,                  // x (web client coords)
+    Double,                  // y (web client coords)
+    Int32                    // phase
+) -> Void
+
 private struct PendingDrag {
     let objectPath: String
     let suggestedName: String
@@ -46,10 +59,19 @@ private struct PendingDrag {
 private final class FilePromiseState {
     static let shared = FilePromiseState()
     var resolver: ResolverFn?
+    var position: PositionFn?
     var userCtx: UnsafeRawPointer?
     var pending: PendingDrag?
     var monitor: Any?
     var mouseDownEvent: NSEvent?
+    // Set when a drag session actually begins, so the source callbacks can
+    // convert screen points to this window's web-client coordinates and tell
+    // JS which object is in flight. Cleared in `endedAt`.
+    var dragWindow: NSWindow?
+    var dragObjectPath: String?
+    // Last screen point we reported, to throttle the high-frequency `movedTo`
+    // stream so we don't flood the IPC channel with sub-pixel jitter.
+    var lastEmit: NSPoint?
     // NSFilePromiseProvider's `delegate` property is WEAK. Without a strong
     // reference here, ARC deallocates the delegate the moment `startDrag`
     // returns — AppKit then queries a nil delegate, gets no filename, and
@@ -63,11 +85,13 @@ private final class FilePromiseState {
 @_cdecl("filepromise_install")
 public func filepromise_install(
     userCtx: UnsafeRawPointer?,
-    resolver: ResolverFn
+    resolver: ResolverFn,
+    position: PositionFn
 ) {
     let state = FilePromiseState.shared
     state.userCtx = userCtx
     state.resolver = resolver
+    state.position = position
 
     if state.monitor != nil { return }
 
@@ -149,6 +173,13 @@ private func startDrag(view: NSView, downEvent: NSEvent, payload: PendingDrag) {
         uti = UTType(filenameExtension: ext) ?? UTType.data
     }
 
+    // Remember the window + dragged object so the source callbacks can map
+    // screen points into this WebView's client coordinates and tell JS which
+    // object is moving. Cleared when the session ends.
+    FilePromiseState.shared.dragWindow = view.window
+    FilePromiseState.shared.dragObjectPath = payload.objectPath
+    FilePromiseState.shared.lastEmit = nil
+
     let delegate = PromiseDelegate(payload: payload)
     // Strong-retain the delegate until the drag session ends — see comment
     // in FilePromiseState. The DragSource.endedAt callback drops it.
@@ -180,6 +211,28 @@ private func startDrag(view: NSView, downEvent: NSEvent, payload: PendingDrag) {
         event: downEvent,
         source: DragSource.shared
     )
+}
+
+// MARK: - In-window drag tracking
+
+// Convert a drag screen point into the WebView's client coordinates (CSS px,
+// top-left origin) and hand it to Rust via the position callback. No-op if no
+// drag is active. `convertFromScreen(_:)` (NSRect form) is used instead of the
+// macOS 14+ `convertPoint(fromScreen:)` so this compiles at the 11.0 Swift
+// deployment target the build uses.
+private func reportDragPosition(_ screenPoint: NSPoint, phase: Int32) {
+    let s = FilePromiseState.shared
+    guard let position = s.position,
+          let window = s.dragWindow,
+          let content = window.contentView,
+          let path = s.dragObjectPath else { return }
+    let winPoint = window.convertFromScreen(NSRect(origin: screenPoint, size: .zero)).origin
+    let viewPoint = content.convert(winPoint, from: nil) // window → content view (bottom-left)
+    let clientX = Double(viewPoint.x)
+    let clientY = Double(content.bounds.height - viewPoint.y) // flip to top-left origin
+    path.withCString { ptr in
+        position(ptr, clientX, clientY, phase)
+    }
 }
 
 // MARK: - Delegate
@@ -264,11 +317,36 @@ private final class DragSource: NSObject, NSDraggingSource {
         NSLog("[filepromise] dragSource.willBeginAt %@", NSStringFromPoint(screenPoint))
     }
 
+    func draggingSession(_ session: NSDraggingSession, movedTo screenPoint: NSPoint) {
+        // Throttle: AppKit fires this continuously; skip sub-2pt jitter so we
+        // don't flood the IPC channel. JS only needs enough resolution to
+        // light up the crumb under the cursor.
+        let s = FilePromiseState.shared
+        if let last = s.lastEmit,
+           abs(last.x - screenPoint.x) < 2, abs(last.y - screenPoint.y) < 2 {
+            return
+        }
+        s.lastEmit = screenPoint
+        reportDragPosition(screenPoint, phase: 1)
+    }
+
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
         NSLog("[filepromise] dragSource.endedAt %@ op=%lu", NSStringFromPoint(screenPoint), operation.rawValue)
-        // Drop strong refs to the delegates that backed this session. We
-        // only run one drag at a time, so clearing all is safe; if we ever
-        // support multi-item drags we'd need per-session tracking.
-        FilePromiseState.shared.activeDelegates.removeAll()
+        // Always report the release as a candidate breadcrumb drop (phase 2)
+        // and let JS decide by hit-testing the point against the crumbs. We
+        // deliberately DON'T gate on `operation`: a drop on Finder lands
+        // outside the window (no crumb there, so JS won't move), while a drop
+        // on a crumb may report a non-empty operation if Wry's webview claims
+        // the drag — gating on `operation` would wrongly suppress that move.
+        reportDragPosition(screenPoint, phase: 2)
+
+        // Drop strong refs to the delegates that backed this session and the
+        // per-drag tracking state. We only run one drag at a time, so clearing
+        // all is safe; multi-item drags would need per-session tracking.
+        let s = FilePromiseState.shared
+        s.activeDelegates.removeAll()
+        s.dragWindow = nil
+        s.dragObjectPath = nil
+        s.lastEmit = nil
     }
 }

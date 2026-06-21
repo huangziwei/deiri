@@ -96,4 +96,13 @@ pub trait Fs: Send + Sync {
     fn delete_dir(&self, path: &TPath) -> Result<bool>;
     fn create_dir(&self, path: &TPath) -> Result<()>;
     fn rename(&self, from: &TPath, to: &TPath) -> Result<()>;
+
+    /// Move the object at `from` into the folder `dest_dir` (device-relative;
+    /// empty = storage root), keeping its name. This is a device-side PTP
+    /// `MoveObject` — nothing is transferred over the wire, so it's cheap even
+    /// for large files and whole folder subtrees. Errors if `from` is missing,
+    /// `dest_dir` isn't a folder, or the destination already holds an object of
+    /// the same name (we never silently overwrite). Moving into the folder the
+    /// object already lives in is a no-op. Used by the drag-onto-breadcrumb move.
+    fn move_to(&self, from: &TPath, dest_dir: &TPath) -> Result<()>;
 }

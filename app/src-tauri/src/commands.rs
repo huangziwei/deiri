@@ -168,6 +168,25 @@ pub async fn create_dir(path: String, state: State<'_, AppState>) -> Result<(), 
     state.with_fs(|fs| fs.create_dir(&p)).map_err(err)
 }
 
+#[derive(Deserialize)]
+pub struct MoveArgs {
+    /// Object to move (device-relative path).
+    pub source: String,
+    /// Destination folder (device-relative; "" = storage root).
+    pub dest_dir: String,
+}
+
+/// Move an object into another folder on the same device. Backs the
+/// drag-onto-breadcrumb gesture: drop a row on an ancestor crumb (or the
+/// device chip = root) to relocate it there. A device-side PTP MoveObject —
+/// see [`Fs::move_to`].
+#[tauri::command]
+pub async fn move_object(args: MoveArgs, state: State<'_, AppState>) -> Result<(), String> {
+    let from = TPath::parse(&args.source);
+    let dest_dir = TPath::parse(&args.dest_dir);
+    state.with_fs(|fs| fs.move_to(&from, &dest_dir)).map_err(err)
+}
+
 // --------------------------------------------------------------------------
 // Dialog wrappers.
 //

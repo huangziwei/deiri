@@ -10,8 +10,15 @@ if (!TAURI) {
 window.api = {
   invoke: (cmd, args) => TAURI.core.invoke(cmd, args),
 
-  // Webview drag-drop. Returns an unlisten function.
+  // Webview drag-drop (Finder → app). Returns an unlisten function.
   onDragDrop: (handler) => TAURI.webview.getCurrentWebview().onDragDropEvent(handler),
+
+  // In-app drag position bridge. Drag-out is a native macOS drag, so the
+  // WebView gets no DOM drag events; the Swift side streams the cursor
+  // position back as `drag-internal` events instead (see file_promise.rs /
+  // FilePromise.swift). Used to drop a row on a breadcrumb crumb to move it.
+  // Returns a Promise of an unlisten function.
+  onDragInternal: (handler) => TAURI.event.listen("drag-internal", handler),
 
   // Native folder picker. Returns a string path or null on cancel.
   //

@@ -17,16 +17,34 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use mtp_core::Fs;
-use tauri::{App, Manager};
+use serde::Serialize;
+use tauri::{App, Emitter, Manager};
 
 use crate::state::AppState;
 
 static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 
+/// One position report from an in-progress native drag, emitted to the
+/// frontend as the `drag-internal` event. The drag-out session is native
+/// AppKit (see FilePromise.swift) so JS gets no DOM drag events; this is how
+/// the breadcrumb learns where the cursor is and when the user lets go inside
+/// the window. `x`/`y` are already converted to web client coordinates (CSS
+/// px, top-left origin). `phase`: 1 = moving, 2 = dropped in-window (Finder
+/// didn't take it — a candidate breadcrumb move), 0 = dropped externally
+/// (clear any highlight). See the JS `onDragInternal` handler.
+#[derive(Clone, Serialize)]
+struct DragInternal {
+    object_path: String,
+    x: f64,
+    y: f64,
+    phase: i32,
+}
+
 unsafe extern "C" {
     fn filepromise_install(
         user_ctx: *const c_void,
         resolver: unsafe extern "C" fn(*const c_char, *const c_char, *const c_void) -> bool,
+        position: unsafe extern "C" fn(*const c_char, f64, f64, i32),
     );
     fn filepromise_arm(
         object_path: *const c_char,
@@ -45,8 +63,31 @@ pub fn install_for_window(app: &mut App) -> Result<(), Box<dyn std::error::Error
     // Passing the handle through the FFI boundary would require boxing and
     // careful lifetime management; the global is simpler and Tauri's handle
     // is process-singleton anyway.
-    unsafe { filepromise_install(std::ptr::null(), resolver_trampoline) };
+    unsafe { filepromise_install(std::ptr::null(), resolver_trampoline, position_trampoline) };
     Ok(())
+}
+
+/// Called by Swift's drag-source callbacks as the native drag moves and ends.
+/// Forwards the (already client-space) cursor position to the frontend so the
+/// breadcrumb can light up the hovered crumb and commit a move on release.
+/// Runs on AppKit's main thread; `emit` is cheap and thread-safe.
+unsafe extern "C" fn position_trampoline(object_path: *const c_char, x: f64, y: f64, phase: i32) {
+    let object_path = if object_path.is_null() {
+        String::new()
+    } else {
+        match unsafe { CStr::from_ptr(object_path) }.to_str() {
+            Ok(s) => s.to_string(),
+            Err(e) => {
+                tracing::error!(?e, "drag-internal: non-UTF-8 object path");
+                return;
+            }
+        }
+    };
+    if let Some(handle) = APP_HANDLE.get() {
+        if let Err(e) = handle.emit("drag-internal", DragInternal { object_path, x, y, phase }) {
+            tracing::error!(?e, "drag-internal: emit failed");
+        }
+    }
 }
 
 unsafe extern "C" fn resolver_trampoline(

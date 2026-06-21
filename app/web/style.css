@@ -187,6 +187,21 @@ header {
 .crumb-current { color: #444; font-weight: 500; }
 .crumb-sep { color: #aaa; }
 
+/* Dragging a row onto the path bar to move it (see onDragInternal). The bar
+   gets a faint droppable wash; the specific crumb/chip under the cursor lights
+   up. The box-shadow pads the highlight so the text doesn't reflow. */
+.path-bar.drag-active { background: #f0f0f5; }
+.crumb-link.drop-target-active,
+#device-chip.drop-target-active {
+  background: #0066cc;
+  color: #fff;
+  border-radius: 3px;
+  box-shadow: 0 0 0 2px #0066cc;
+  text-decoration: none;
+}
+#device-chip.drop-target-active #device-chip-label,
+#device-chip.drop-target-active #device-chip-chevron { color: #fff; }
+
 /* Status bar — item/selection count + storage, centered like Finder. */
 #status-bar {
   display: flex;
@@ -406,6 +421,7 @@ body.col-resizing { cursor: col-resize; }
   #nav-buttons button { background: #2c2c30; border-color: #44444a; color: inherit; }
   #nav-buttons button:hover:not(:disabled) { background: #34343a; }
   .path-bar, #status-bar { background: #252528; border-top-color: #36363a; }
+  .path-bar.drag-active { background: #30303a; }
   .crumb-current { color: #cdcdd0; }
   .crumb-sep { color: #666; }
   #status-bar { color: #999; }

@@ -13,6 +13,7 @@ const deviceChipChevron = $("device-chip-chevron");
 const deviceRenameInput = $("device-rename");
 const deviceMenu = $("device-menu");
 const breadcrumbEl = $("breadcrumb");
+const pathBar = document.querySelector(".path-bar");
 const statusEl = $("status");
 const listEl = $("list");
 const listBody = $("list-body");
@@ -1016,6 +1017,10 @@ function renderBreadcrumb() {
     if (!isCurrent) {
       const path = acc.join("/");
       el.addEventListener("click", () => navigateTo(path));
+      // Ancestor crumbs are move targets for a dragged row (see
+      // onDragInternal). The current crumb isn't tagged — moving into the
+      // folder you're already in is a no-op.
+      el.dataset.droppath = path;
     }
     breadcrumbEl.appendChild(el);
   });
@@ -1176,6 +1181,88 @@ window.api.onDragDrop(async (event) => {
     }
     invalidateAncestorsOf(cwd); // new files grew this folder and its ancestors
     await Promise.all([refreshList(), refreshStorage()]);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Drag onto the breadcrumb (in-app move to an ancestor folder)
+//
+// Drag-out is a NATIVE macOS drag (see FilePromise.swift), so the WebView gets
+// no DOM drag events. Swift instead streams the cursor position back as
+// `drag-internal` events: phase 1 while moving, phase 2 when released inside
+// the window (Finder didn't take it), phase 0 when released outside. We treat
+// the path bar's ancestor crumbs (and the device chip = root) as drop targets:
+// highlight the one under the cursor, and on an in-window drop relocate the
+// dragged object there with the `move_object` command.
+
+// The device chip is the path root, so it's the "move to top level" target.
+// Tagged once; the handler still gates on an open device and a real change.
+deviceChip.dataset.droppath = "";
+
+let dragHoverTarget = null; // drop-target element currently highlighted, if any
+
+// The drop target under a client point: the nearest ancestor carrying a
+// destination path (crumbs + the chip). null when the point isn't over one.
+function dropTargetAt(x, y) {
+  const el = document.elementFromPoint(x, y);
+  return el ? el.closest("[data-droppath]") : null;
+}
+
+function clearDropHighlight() {
+  if (dragHoverTarget) {
+    dragHoverTarget.classList.remove("drop-target-active");
+    dragHoverTarget = null;
+  }
+}
+
+async function commitBreadcrumbMove(sourcePath, destDir) {
+  const name = sourcePath.split("/").pop();
+  try {
+    await window.api.invoke("move_object", {
+      args: { source: sourcePath, dest_dir: destDir },
+    });
+  } catch (err) {
+    console.error("move failed", sourcePath, "→", destDir, err);
+    alert(`Couldn't move ${name}:\n\n${err}`);
+    return;
+  }
+  // The object left `cwd` and landed in `destDir`; cached folder sizes along
+  // both chains are now wrong. Invalidate ancestors of each, then refresh.
+  invalidateAncestorsOf(cwd);
+  invalidateAncestorsOf(destDir);
+  await Promise.all([refreshList(), refreshStorage()]);
+}
+
+window.api.onDragInternal(({ payload }) => {
+  const { object_path: sourcePath, x, y, phase } = payload;
+  if (phase === 1) {
+    // Moving: mark the bar droppable and highlight the crumb under the cursor.
+    pathBar.classList.add("drag-active");
+    const target = dropTargetAt(x, y);
+    if (target !== dragHoverTarget) {
+      clearDropHighlight();
+      if (target) {
+        target.classList.add("drop-target-active");
+        dragHoverTarget = target;
+      }
+    }
+    return;
+  }
+  // Any other phase = the drag ended. Commit to whatever crumb was lit at
+  // release — that's exactly what the user saw under the cursor. We trust the
+  // tracked hover target over re-hit-testing the end coordinates, because
+  // AppKit's `endedAt` doesn't reliably report the release point (it can hand
+  // back a slide-back/origin point, which would miss the crumb). Fall back to
+  // a coordinate hit-test only if nothing was highlighted.
+  pathBar.classList.remove("drag-active");
+  internalDragInProgress = false; // the native drag likely consumed our mouseup
+  const target = dragHoverTarget || dropTargetAt(x, y);
+  clearDropHighlight();
+  if (target && openDeviceId) {
+    const destDir = target.dataset.droppath; // "" = device root
+    // Guard the no-op move into the object's current folder (crumbs are
+    // ancestors so this shouldn't be a target, but the chip-at-root case can).
+    if (destDir !== cwd) commitBreadcrumbMove(sourcePath, destDir);
   }
 });
 

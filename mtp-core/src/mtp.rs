@@ -591,6 +591,57 @@ impl Fs for MtpFs {
         // triggers a rename from the UI.
         Err(anyhow!("rename: not implemented yet"))
     }
+
+    fn move_to(&self, from: &TPath, dest_dir: &TPath) -> Result<()> {
+        let _g = self.op_lock.lock().expect("op_lock poisoned");
+        block_on(async {
+            let name = from.name().ok_or_else(|| anyhow!("move: empty source path"))?;
+
+            // No-op when the destination is the object's current parent. The
+            // breadcrumb only offers ancestors so this shouldn't fire from the
+            // UI, but a same-parent MoveObject is undefined on some devices —
+            // guard it. (`name` above guarantees `from` is non-empty, so
+            // `parent()` is `Some`; root-level files compare against the empty
+            // `dest_dir`, the "move to root" case.)
+            if from.parent().as_ref() == Some(dest_dir) {
+                return Ok(());
+            }
+
+            let handle = self
+                .resolve(from)
+                .await?
+                .ok_or_else(|| anyhow!("move: source not found at `{from}`"))?;
+
+            // Destination parent handle. Empty path = storage root.
+            let parent = if dest_dir.is_empty() {
+                None
+            } else {
+                match self.resolve_object(dest_dir).await? {
+                    Some(obj) if obj.is_folder() => Some(obj.handle),
+                    Some(_) => return Err(anyhow!("move: destination `{dest_dir}` is not a folder")),
+                    None => return Err(anyhow!("move: destination folder `{dest_dir}` not found")),
+                }
+            };
+
+            // Don't clobber a same-named object already in the destination —
+            // PTP MoveObject's collision behavior is device-defined, so we
+            // refuse rather than risk a silent overwrite or a cryptic failure.
+            let existing = self.storage.list_objects(parent).await.map_err(map_err)?;
+            if existing.iter().any(|o| o.filename == name) {
+                return Err(anyhow!(
+                    "`{name}` already exists in the destination folder"
+                ));
+            }
+
+            let new_parent = parent.unwrap_or(ObjectHandle::ROOT);
+            self.storage
+                .move_object(handle, new_parent, None)
+                .await
+                .map_err(map_err)
+                .with_context(|| format!("move {from} -> {dest_dir}"))?;
+            Ok(())
+        })
+    }
 }
 
 fn map_err(err: mtp_rs::Error) -> anyhow::Error {
