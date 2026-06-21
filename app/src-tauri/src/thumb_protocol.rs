@@ -98,7 +98,7 @@ fn cache_path_for(app: &AppHandle, device_id: &str, object_id: u32) -> Result<Pa
 /// it. Keep `[A-Za-z0-9_.-]` as-is, fold the rest to `_`. Stable mapping; the
 /// cache directory is rebuildable so collisions across edge-case serials don't
 /// matter beyond a wasted re-fetch.
-fn slugify_device_id(id: &str) -> String {
+pub(crate) fn slugify_device_id(id: &str) -> String {
     id.chars()
         .map(|c| match c {
             'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '.' | '-' => c,

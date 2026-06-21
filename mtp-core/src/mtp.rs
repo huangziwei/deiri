@@ -430,11 +430,8 @@ impl Fs for MtpFs {
                         // Walk up to (but not including) root, collecting names.
                         let mut parts: Vec<&str> = Vec::new();
                         let mut cur = handle;
-                        loop {
-                            match name_of.get(&cur) {
-                                Some(n) => parts.push(n),
-                                None => break,
-                            }
+                        while let Some(n) = name_of.get(&cur) {
+                            parts.push(n);
                             match parent_of.get(&cur) {
                                 Some(&p) if p == root => break,
                                 Some(&p) => cur = p,

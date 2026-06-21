@@ -12,6 +12,7 @@ use mtp_core::{DeviceDescriptor, Entry, FolderSize, Fs, MtpFs, StorageInfo, TPat
 use serde::Deserialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_opener::OpenerExt;
 
 use crate::state::{AppState, OpenSession};
 use crate::thumb_protocol;
@@ -63,6 +64,7 @@ pub async fn open_device(
     // session must rebuild its cache. We do this after the open succeeds so a
     // failed open doesn't trash a still-good cache.
     thumb_protocol::clear_for_device(&app, &args.device_id);
+    crate::open_file::clear_for_device(&app, &args.device_id);
     let mut guard = state.current.lock().map_err(|_| "session lock poisoned".to_string())?;
     *guard = Some(OpenSession {
         device_id: args.device_id,
@@ -140,6 +142,50 @@ pub struct DownloadArgs {
 pub async fn download_to(args: DownloadArgs, state: State<'_, AppState>) -> Result<(), String> {
     let src = TPath::parse(&args.source);
     state.with_fs(|fs| fs.download_to(&src, &args.dest)).map_err(err)
+}
+
+#[derive(Deserialize)]
+pub struct OpenObjectArgs {
+    /// File path on the device (device-relative).
+    pub path: String,
+    /// Raw PTP object handle — keys the per-session temp copy so a repeat open
+    /// skips the MTP download. Must come from the same session's `Entry`.
+    pub object_id: u32,
+}
+
+/// Open a device file with the system default app. Pulls the object to a
+/// per-session temp copy (cached by handle under the app cache — see
+/// [`crate::open_file`]) and hands it to the OS opener. A read-only preview:
+/// external edits are not written back. Folders are navigated into by the
+/// frontend, so this is only ever called for files.
+#[tauri::command]
+pub async fn open_object(
+    app: AppHandle,
+    args: OpenObjectArgs,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let src = TPath::parse(&args.path);
+    let name = src
+        .name()
+        .ok_or_else(|| "Can't open the device root.".to_string())?
+        .to_string();
+    let device_id = state.device_id().map_err(err)?;
+    let dest = crate::open_file::cache_path(&app, &device_id, args.object_id, &name).map_err(err)?;
+
+    // Reuse a prior pull if the handle's temp copy is still on disk; otherwise
+    // download it (creating the parent dir, which `download_to` doesn't do for
+    // the file case).
+    if !dest.exists() {
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| err(e.into()))?;
+        }
+        state.with_fs(|fs| fs.download_to(&src, &dest)).map_err(err)?;
+    }
+
+    app.opener()
+        .open_path(dest.to_string_lossy().into_owned(), None::<&str>)
+        .map_err(|e| err(anyhow::anyhow!("open failed: {e}")))?;
+    Ok(())
 }
 
 #[derive(Deserialize)]

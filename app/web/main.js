@@ -538,9 +538,7 @@ function renderListView() {
     tr.append(nameTd, sizeTd, modTd);
 
     tr.addEventListener("click", (ev) => onRowClick(idx, ev));
-    tr.addEventListener("dblclick", () => {
-      if (e.is_dir) navigateTo(cwd ? `${cwd}/${e.name}` : e.name);
-    });
+    tr.addEventListener("dblclick", () => openEntry(e));
     tr.addEventListener("contextmenu", (ev) => onRowContextMenu(idx, ev));
 
     attachDragOut(tr, e); // files and folders both drag out (folders recurse)
@@ -608,9 +606,7 @@ function buildTile(e, idx) {
   tile.append(thumbBox, nameEl);
 
   tile.addEventListener("click", (ev) => onRowClick(idx, ev));
-  tile.addEventListener("dblclick", () => {
-    if (e.is_dir) navigateTo(cwd ? `${cwd}/${e.name}` : e.name);
-  });
+  tile.addEventListener("dblclick", () => openEntry(e));
   tile.addEventListener("contextmenu", (ev) => onRowContextMenu(idx, ev));
   attachDragOut(tile, e); // files and folders both drag out (folders recurse)
   return tile;
@@ -683,8 +679,10 @@ function onRowContextMenu(idx, ev) {
       onSelect: saveSelectedTo,
     },
   ];
-  // Rename is a single-item action (in-place device rename).
+  // Open / Rename are single-item actions. Open previews a file (or descends
+  // into a folder); Rename edits the name in place on the device.
   if (count === 1) {
+    items.unshift({ label: "Open", onSelect: () => openEntry(selectedEntries[0]) });
     items.push({ label: "Rename", onSelect: () => beginRename(idx) });
   }
   // Recursive folder sizing only has somewhere to show in the list view, so
@@ -850,6 +848,49 @@ async function saveSelectedTo() {
       break;
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Open (read-only preview)
+//
+// Double-click / ⌘O / ⌘↓ on a file pulls it to a temp copy and opens it in the
+// system default app (see open_object in commands.rs). Folders navigate
+// instead. Enter stays bound to rename, matching Finder.
+
+function openEntry(entry) {
+  if (!entry) return;
+  if (entry.is_dir) navigateTo(pathFor(entry.name));
+  else openFile(entry);
+}
+
+async function openFile(entry) {
+  const opening = `Opening ${entry.name}…`;
+  const restore = statusEl.textContent;
+  statusEl.textContent = opening;
+  try {
+    await window.api.openObject(pathFor(entry.name), entry.object_id);
+  } catch (err) {
+    console.error("open failed", entry.name, err);
+    alert(`Couldn't open ${entry.name}:\n\n${err}`);
+  } finally {
+    // Only clear our transient message if nothing else overwrote it meanwhile.
+    if (statusEl.textContent === opening) statusEl.textContent = restore;
+  }
+}
+
+// Keyboard / menu "Open" on the current selection: open every selected file; a
+// lone selected folder navigates instead (Finder's ⌘↓).
+function openSelected() {
+  const sel = [...selected]
+    .map((p) => entries.find((x) => pathFor(x.name) === p))
+    .filter(Boolean);
+  if (sel.length === 0) return;
+  const files = sel.filter((e) => !e.is_dir);
+  if (files.length === 0) {
+    if (sel.length === 1) navigateTo(pathFor(sel[0].name));
+    return;
+  }
+  for (const f of files) openFile(f);
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,6 +1154,12 @@ document.addEventListener("keydown", (ev) => {
   } else if ((ev.metaKey || ev.ctrlKey) && ev.key === "]") {
     ev.preventDefault(); // Finder's Forward shortcut
     goForward();
+  } else if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "o") {
+    ev.preventDefault(); // Finder's Open shortcut
+    openSelected();
+  } else if ((ev.metaKey || ev.ctrlKey) && ev.key === "ArrowDown") {
+    ev.preventDefault(); // Finder's ⌘↓ = open / descend
+    openSelected();
   } else if (ev.key === "Backspace" || ev.key === "Delete") {
     if (selected.size === 0) return;
     ev.preventDefault();

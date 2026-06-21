@@ -10,6 +10,12 @@ if (!TAURI) {
 window.api = {
   invoke: (cmd, args) => TAURI.core.invoke(cmd, args),
 
+  // Open a device file with the system default app. Pulls it to a per-session
+  // temp copy (cached by object handle) and hands it to the OS opener.
+  // Read-only preview — external edits aren't synced back.
+  openObject: (path, objectId) =>
+    TAURI.core.invoke("open_object", { args: { path, object_id: objectId } }),
+
   // Webview drag-drop (Finder → app). Returns an unlisten function.
   onDragDrop: (handler) => TAURI.webview.getCurrentWebview().onDragDropEvent(handler),
 

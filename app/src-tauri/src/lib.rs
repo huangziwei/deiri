@@ -1,4 +1,5 @@
 mod commands;
+mod open_file;
 mod state;
 mod thumb_protocol;
 
@@ -39,6 +40,7 @@ pub fn run() {
         commands::create_dir,
         commands::move_object,
         commands::rename,
+        commands::open_object,
         commands::pick_folder,
         commands::confirm_dialog,
         file_promise::drag_arm,
@@ -59,6 +61,7 @@ pub fn run() {
         commands::create_dir,
         commands::move_object,
         commands::rename,
+        commands::open_object,
         commands::pick_folder,
         commands::confirm_dialog,
     ]);
