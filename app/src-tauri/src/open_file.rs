@@ -12,9 +12,11 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use mtp_core::{Fs, TPath};
 use tauri::{AppHandle, Manager};
 
+use crate::state::AppState;
 use crate::thumb_protocol::slugify_device_id;
 
 /// `<AppCache>/open/<device>/<object_id>/<name>`. The object_id directory keys
@@ -28,6 +30,31 @@ pub fn cache_path(app: &AppHandle, device_id: &str, object_id: u32, name: &str) 
         .join(slugify_device_id(device_id))
         .join(object_id.to_string())
         .join(name))
+}
+
+/// Ensure a local temp copy of the device file at `path` exists and return its
+/// location, downloading it (cached by handle) only if not already present.
+/// Shared by open-with-default-app and Quick Look — both need a real local file
+/// to hand to the OS. Blocks on the MTP download; callers run on a command
+/// worker thread, same as `download_to`.
+pub fn ensure_local_copy(
+    app: &AppHandle,
+    state: &AppState,
+    path: &str,
+    object_id: u32,
+) -> Result<PathBuf> {
+    let src = TPath::parse(path);
+    let device_id = state.device_id()?;
+    let name = src.name().ok_or_else(|| anyhow!("can't open the device root"))?;
+    let dest = cache_path(app, &device_id, object_id, name)?;
+    if !dest.exists() {
+        // `download_to` only mkdirs for the folder branch, so create the parent.
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        state.with_fs(|fs| fs.download_to(&src, &dest))?;
+    }
+    Ok(dest)
 }
 
 /// Wipe opened-file temp copies for a device. Called when its session is

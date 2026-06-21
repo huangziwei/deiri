@@ -6,6 +6,9 @@ mod thumb_protocol;
 #[cfg(target_os = "macos")]
 mod file_promise;
 
+#[cfg(target_os = "macos")]
+mod quicklook;
+
 use tracing_subscriber::EnvFilter;
 
 pub fn run() {
@@ -41,6 +44,7 @@ pub fn run() {
         commands::move_object,
         commands::rename,
         commands::open_object,
+        quicklook::quicklook_object,
         commands::pick_folder,
         commands::confirm_dialog,
         file_promise::drag_arm,

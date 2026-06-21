@@ -164,24 +164,8 @@ pub async fn open_object(
     args: OpenObjectArgs,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let src = TPath::parse(&args.path);
-    let name = src
-        .name()
-        .ok_or_else(|| "Can't open the device root.".to_string())?
-        .to_string();
-    let device_id = state.device_id().map_err(err)?;
-    let dest = crate::open_file::cache_path(&app, &device_id, args.object_id, &name).map_err(err)?;
-
-    // Reuse a prior pull if the handle's temp copy is still on disk; otherwise
-    // download it (creating the parent dir, which `download_to` doesn't do for
-    // the file case).
-    if !dest.exists() {
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| err(e.into()))?;
-        }
-        state.with_fs(|fs| fs.download_to(&src, &dest)).map_err(err)?;
-    }
-
+    let dest = crate::open_file::ensure_local_copy(&app, state.inner(), &args.path, args.object_id)
+        .map_err(err)?;
     app.opener()
         .open_path(dest.to_string_lossy().into_owned(), None::<&str>)
         .map_err(|e| err(anyhow::anyhow!("open failed: {e}")))?;

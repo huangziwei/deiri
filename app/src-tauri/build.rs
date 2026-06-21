@@ -89,4 +89,6 @@ fn build_swift_plugin() {
     println!("cargo:rustc-link-lib=framework=AppKit");
     println!("cargo:rustc-link-lib=framework=Foundation");
     println!("cargo:rustc-link-lib=framework=UniformTypeIdentifiers");
+    // QLPreviewPanel (Quick Look) lives in the Quartz umbrella framework.
+    println!("cargo:rustc-link-lib=framework=Quartz");
 }

@@ -893,6 +893,34 @@ function openSelected() {
   for (const f of files) openFile(f);
 }
 
+// Space = Quick Look the primary selected file (the anchor if it's a selected
+// file, else the first selected file). Folders aren't previewed. v1 shows one
+// file; arrow-through across a multi-selection is a follow-up.
+function quickLookSelected() {
+  const anchor = entries[anchorIndex];
+  if (anchor && !anchor.is_dir && selected.has(pathFor(anchor.name))) {
+    quickLook(anchor);
+    return;
+  }
+  const file = [...selected]
+    .map((p) => entries.find((x) => pathFor(x.name) === p))
+    .find((e) => e && !e.is_dir);
+  if (file) quickLook(file);
+}
+
+async function quickLook(entry) {
+  const loading = `Loading preview of ${entry.name}…`;
+  const restore = statusEl.textContent;
+  statusEl.textContent = loading;
+  try {
+    await window.api.quickLookObject(pathFor(entry.name), entry.object_id);
+  } catch (err) {
+    console.error("quick look failed", entry.name, err);
+  } finally {
+    if (statusEl.textContent === loading) statusEl.textContent = restore;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // New folder
 //
@@ -1160,6 +1188,11 @@ document.addEventListener("keydown", (ev) => {
   } else if ((ev.metaKey || ev.ctrlKey) && ev.key === "ArrowDown") {
     ev.preventDefault(); // Finder's ⌘↓ = open / descend
     openSelected();
+  } else if (ev.key === " ") {
+    if (selected.size > 0) {
+      ev.preventDefault(); // Quick Look — also stops Space scrolling the list
+      quickLookSelected();
+    }
   } else if (ev.key === "Backspace" || ev.key === "Delete") {
     if (selected.size === 0) return;
     ev.preventDefault();

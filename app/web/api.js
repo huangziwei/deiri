@@ -16,6 +16,11 @@ window.api = {
   openObject: (path, objectId) =>
     TAURI.core.invoke("open_object", { args: { path, object_id: objectId } }),
 
+  // Quick Look a device file (macOS QLPreviewPanel). Same temp-copy pull as
+  // openObject; Space again on the same file toggles the panel closed.
+  quickLookObject: (path, objectId) =>
+    TAURI.core.invoke("quicklook_object", { args: { path, object_id: objectId } }),
+
   // Webview drag-drop (Finder → app). Returns an unlisten function.
   onDragDrop: (handler) => TAURI.webview.getCurrentWebview().onDragDropEvent(handler),
 
