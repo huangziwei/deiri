@@ -31,6 +31,19 @@ window.api = {
   // Returns a Promise of an unlisten function.
   onDragInternal: (handler) => TAURI.event.listen("drag-internal", handler),
 
+  // Transfers (upload in / download out) with progress + cancel. The frontend
+  // mints `job` so its progress panel and Cancel button work before the first
+  // byte moves; the same id cancels it. Progress arrives as `transfer-progress`
+  // events. Drag-OUT to Finder uses the OS sheet and isn't routed here.
+  uploadFiles: (job, sources, destDir) =>
+    TAURI.core.invoke("upload_files", { args: { job, sources, dest_dir: destDir } }),
+  downloadObjects: (job, sources, destDir, fileCount) =>
+    TAURI.core.invoke("download_objects", {
+      args: { job, sources, dest_dir: destDir, file_count: fileCount },
+    }),
+  cancelTransfer: (job) => TAURI.core.invoke("cancel_transfer", { job }),
+  onTransferProgress: (handler) => TAURI.event.listen("transfer-progress", handler),
+
   // Native folder picker. Returns a string path or null on cancel.
   //
   // We go through our Rust wrapper (`pick_folder`) rather than calling

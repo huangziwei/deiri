@@ -231,6 +231,64 @@ header {
   min-height: 24px;
 }
 
+/* Transfer bar — sits just above the status bar while an upload/download runs:
+   current file + per-file progress + Cancel. Driven by the transfer code in
+   main.js (transfer-progress events). */
+#transfer-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 12px;
+  border-top: 1px solid #e5e5e8;
+  background: #fafafb;
+  font-size: 12px;
+  min-height: 30px;
+}
+/* The id selector above beats the UA `[hidden] { display: none }` rule, so make
+   hiding explicit — otherwise the bar shows on launch and never goes away. */
+#transfer-bar[hidden] { display: none; }
+#transfer-info {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  flex: 0 1 40%;
+  line-height: 1.25;
+}
+#transfer-label {
+  color: #444;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#transfer-count { color: #888; font-size: 11px; }
+#transfer-track {
+  flex: 1 1 auto;
+  height: 6px;
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+}
+#transfer-fill {
+  height: 100%;
+  width: 0;
+  background: #0066cc;
+  border-radius: 3px;
+  transition: width 0.12s linear;
+}
+#transfer-cancel {
+  flex: 0 0 auto;
+  padding: 2px 12px;
+  border: 1px solid #cfcfd4;
+  border-radius: 5px;
+  background: #fff;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+#transfer-cancel:hover:not(:disabled) { background: #f0f0f2; }
+#transfer-cancel:disabled { opacity: 0.5; cursor: default; }
+
 /* Format filter pills — derived from the current folder's file types. Take the
    flexible middle of the header; scroll horizontally if a folder has many. */
 #filter-pills {
@@ -468,6 +526,11 @@ body.col-resizing { cursor: col-resize; }
   .crumb-current { color: #cdcdd0; }
   .crumb-sep { color: #666; }
   #status-bar { color: #999; }
+  #transfer-bar { background: #252528; border-top-color: #36363a; }
+  #transfer-label { color: #cdcdd0; }
+  #transfer-track { background: rgba(255, 255, 255, 0.12); }
+  #transfer-cancel { background: #2c2c30; border-color: #44444a; }
+  #transfer-cancel:hover:not(:disabled) { background: #34343a; }
   #device-chip-chevron:hover { background: rgba(255, 255, 255, 0.1); }
   #device-chip { background: #2c2c30; border-color: #44444a; color: inherit; }
   #device-chip:hover { background: #34343a; }

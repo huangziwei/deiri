@@ -830,23 +830,31 @@ async function deleteSelected() {
 
 async function saveSelectedTo() {
   if (selected.size === 0) return;
+  // Snapshot the selection before the async folder pick (it could change under us).
+  const sources = [...selected];
+  const sel = sources
+    .map((p) => entries.find((x) => pathFor(x.name) === p))
+    .filter(Boolean);
+  if (sel.length === 0) return;
+  if (transferActive()) {
+    alert("A transfer is already in progress. Wait for it to finish or cancel it.");
+    return;
+  }
   const destDir = await window.api.pickFolder("Save to…");
   if (!destDir) return;
-  for (const path of [...selected]) {
-    const name = path.split("/").pop();
-    const ent = entries.find((x) => x.name === name);
-    if (!ent) continue;
-    try {
-      // download_to recreates a folder's whole subtree at dest when source is
-      // a directory; for a file it just writes the file.
-      await window.api.invoke("download_to", {
-        args: { source: path, dest: `${destDir}/${name}` },
-      });
-    } catch (err) {
-      console.error("download failed", path, err);
-      alert(`Couldn't save ${name}:\n\n${err}`);
-      break;
-    }
+  // "i of N" only when no folders are selected — we don't pre-walk device folders.
+  const fileCount = sel.every((e) => !e.is_dir) ? sel.length : 0;
+  const job = startTransfer("download");
+  if (job === null) return;
+  try {
+    // download_objects loops over the sources in one job, writing each as
+    // dest/<name> (folders recreate their subtree), streaming progress.
+    await window.api.downloadObjects(job, sources, destDir, fileCount);
+  } catch (err) {
+    console.error("download failed", err);
+    alert(`Couldn't save:\n\n${err}`);
+  } finally {
+    endTransfer();
   }
 }
 
@@ -1411,6 +1419,76 @@ document.addEventListener("mousedown", () => { internalDragInProgress = true; })
 document.addEventListener("mouseup", () => { internalDragInProgress = false; });
 window.addEventListener("blur", () => { internalDragInProgress = false; });
 
+// ---------------------------------------------------------------------------
+// Transfers (upload in / download out): progress bar + cancel.
+//
+// One job at a time — the device serializes anyway. The frontend mints the job
+// id and shows the bar synchronously, so Cancel works even before the first
+// byte. The backend streams throttled `transfer-progress` events; the command's
+// promise resolving (or rejecting) ends the job. Drag-OUT to Finder keeps its
+// native OS copy sheet and never reaches here.
+
+const transferBar = $("transfer-bar");
+const transferLabel = $("transfer-label");
+const transferCount = $("transfer-count");
+const transferFill = $("transfer-fill");
+const transferCancelBtn = $("transfer-cancel");
+
+let transferSeq = 0;
+let activeTransfer = null; // { job, direction, cancelling } while one runs
+
+function transferActive() {
+  return activeTransfer !== null;
+}
+
+// Claim a job and show the bar. Returns the job id, or null if one is already
+// running (the caller should bail).
+function startTransfer(direction) {
+  if (activeTransfer) return null;
+  const job = ++transferSeq;
+  activeTransfer = { job, direction, cancelling: false };
+  transferLabel.textContent = direction === "upload" ? "Preparing upload…" : "Preparing…";
+  transferCount.textContent = "";
+  transferFill.style.width = "0%";
+  transferCancelBtn.disabled = false;
+  transferBar.hidden = false;
+  return job;
+}
+
+function endTransfer() {
+  transferBar.hidden = true;
+  activeTransfer = null;
+}
+
+window.api.onTransferProgress(({ payload }) => {
+  if (!activeTransfer || payload.job !== activeTransfer.job) return;
+  if (activeTransfer.cancelling) {
+    transferLabel.textContent = "Cancelling…";
+  } else {
+    const verb = payload.direction === "upload" ? "Uploading" : "Downloading";
+    transferLabel.textContent = `${verb} ${payload.file_name}`;
+  }
+  transferCount.textContent =
+    payload.file_count > 0
+      ? `${payload.file_index} of ${payload.file_count}`
+      : `${payload.file_index} file${payload.file_index === 1 ? "" : "s"}`;
+  const pct =
+    payload.file_total > 0
+      ? Math.min(100, Math.round((payload.file_bytes / payload.file_total) * 100))
+      : payload.file_bytes > 0
+        ? 100
+        : 0;
+  transferFill.style.width = `${pct}%`;
+});
+
+transferCancelBtn.addEventListener("click", () => {
+  if (!activeTransfer || activeTransfer.cancelling) return;
+  activeTransfer.cancelling = true;
+  transferLabel.textContent = "Cancelling…";
+  transferCancelBtn.disabled = true;
+  window.api.cancelTransfer(activeTransfer.job).catch((e) => console.error("cancel failed", e));
+});
+
 window.api.onDragDrop(async (event) => {
   const payload = event.payload;
   if (payload.type === "enter" || payload.type === "over") {
@@ -1420,13 +1498,15 @@ window.api.onDragDrop(async (event) => {
   } else if (payload.type === "drop") {
     dropzone.hidden = true;
     if (!openDeviceId || internalDragInProgress) return;
+    const job = startTransfer("upload");
+    if (job === null) return; // a transfer is already running
     try {
-      await window.api.invoke("upload_files", {
-        args: { sources: payload.paths, dest_dir: cwd },
-      });
+      await window.api.uploadFiles(job, payload.paths, cwd);
     } catch (err) {
       console.error("upload failed", err);
       alert(`Upload failed: ${err}`);
+    } finally {
+      endTransfer();
     }
     invalidateAncestorsOf(cwd); // new files grew this folder and its ancestors
     await Promise.all([refreshList(), refreshStorage()]);

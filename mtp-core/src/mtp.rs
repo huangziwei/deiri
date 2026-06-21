@@ -12,9 +12,11 @@
 //! events can't interleave on the same session.
 
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{Read, Write};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
@@ -27,10 +29,16 @@ use mtp_rs::ptp::{
 
 use crate::fs::{Entry, FolderSize, Fs, StorageInfo};
 use crate::path::TPath;
+use crate::transfer::Transfer;
 
 /// Upload chunk size. 256 KiB balances allocator churn against syscall
 /// overhead; raise for fewer reads at the cost of bigger transient allocs.
 const UPLOAD_CHUNK: usize = 256 * 1024;
+
+/// How long the USB cancel drain waits per pipe before assuming it's clear when
+/// we abort a streaming download. The doc on `FileDownload::cancel` suggests
+/// 1–2s is plenty; we sit at the high end so a slow device still drains clean.
+const CANCEL_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct MtpFs {
     /// Retained so `list` can reach `session()` for the `GetObjectPropValue`
@@ -149,7 +157,7 @@ impl MtpFs {
     /// subfolders are preserved. Iterative (explicit stack) so deep trees can't
     /// blow the stack, and so we hold the one `op_lock` for the whole walk like
     /// [`delete_dir`](Self::delete_dir) does.
-    async fn download_folder(&self, root: ObjectHandle, dest: &Path) -> Result<()> {
+    async fn download_folder(&self, root: ObjectHandle, dest: &Path, xfer: &Transfer<'_>) -> Result<()> {
         std::fs::create_dir_all(dest)
             .with_context(|| format!("create local dir {}", dest.display()))?;
         let mut stack: Vec<(ObjectHandle, PathBuf)> = vec![(root, dest.to_path_buf())];
@@ -166,11 +174,41 @@ impl MtpFs {
                         .with_context(|| format!("create local dir {}", child_local.display()))?;
                     stack.push((c.handle, child_local));
                 } else {
-                    let bytes = self.storage.download(c.handle).await.map_err(map_err)?;
-                    std::fs::write(&child_local, &bytes).with_context(|| {
-                        format!("write {} ({} bytes)", child_local.display(), bytes.len())
-                    })?;
+                    self.download_file_streaming(c.handle, &child_local, &c.filename, xfer)
+                        .await?;
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Stream one device object to `dest`, writing chunks to disk as they arrive
+    /// (so multi-GB files don't buffer in memory) and reporting bytes to
+    /// `xfer.sink`. Polls `xfer.cancel` after each chunk; on cancel it drains
+    /// the USB stream via `FileDownload::cancel` so the session stays usable,
+    /// then returns an `Err` the caller treats as a cancellation.
+    async fn download_file_streaming(
+        &self,
+        handle: ObjectHandle,
+        dest: &Path,
+        name: &str,
+        xfer: &Transfer<'_>,
+    ) -> Result<()> {
+        let mut dl = self.storage.download_stream(handle).await.map_err(map_err)?;
+        xfer.sink.file_start(name, dl.size());
+        let mut file =
+            std::fs::File::create(dest).with_context(|| format!("create {}", dest.display()))?;
+        while let Some(chunk) = dl.next_chunk().await {
+            let bytes = chunk.map_err(map_err)?;
+            file.write_all(&bytes)
+                .with_context(|| format!("write {}", dest.display()))?;
+            xfer.sink.file_progress(dl.bytes_received());
+            if xfer.cancelled() {
+                // Must drain before dropping or the USB session is corrupted.
+                dl.cancel(CANCEL_TIMEOUT).await.map_err(map_err)?;
+                drop(file); // close before removing the half-written file
+                let _ = std::fs::remove_file(dest);
+                return Err(anyhow!("transfer cancelled"));
             }
         }
         Ok(())
@@ -187,6 +225,7 @@ impl MtpFs {
         name: &str,
         src: &Path,
         existing: &[ObjectInfo],
+        xfer: &Transfer<'_>,
     ) -> Result<()> {
         if let Some(old) = existing.iter().find(|o| o.filename == name) {
             self.storage
@@ -202,6 +241,7 @@ impl MtpFs {
             .with_context(|| format!("stat {}", src.display()))?
             .len();
         let info = NewObjectInfo::file(name, size);
+        xfer.sink.file_start(name, size);
 
         // Stream the file from disk in fixed-size chunks. See the comment in
         // `upload_from`'s prior single-file body (now this helper) for why the
@@ -218,8 +258,17 @@ impl MtpFs {
             }
         })
         .boxed();
+        // `upload_with_progress` reports bytes as it drains our stream and lets
+        // us abort by returning `Break` — which surfaces as `Error::Cancelled`.
         self.storage
-            .upload(parent, info, stream)
+            .upload_with_progress(parent, info, stream, |p| {
+                xfer.sink.file_progress(p.bytes_transferred);
+                if xfer.cancelled() {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
             .await
             .map_err(map_err)
             .with_context(|| format!("upload {name}"))?;
@@ -231,7 +280,7 @@ impl MtpFs {
     /// if it already exists — files colliding by name are overwritten, matching
     /// the single-file path. Symlinks and other non-file/non-dir entries are
     /// skipped. Iterative for the same reasons as [`download_folder`](Self::download_folder).
-    async fn upload_folder(&self, src: &Path, dest: &TPath) -> Result<()> {
+    async fn upload_folder(&self, src: &Path, dest: &TPath, xfer: &Transfer<'_>) -> Result<()> {
         let root = self
             .ensure_folder(dest)
             .await?
@@ -279,7 +328,7 @@ impl MtpFs {
                     };
                     stack.push((child_local, child_handle));
                 } else if ftype.is_file() {
-                    self.upload_file(Some(parent), name, &child_local, &existing)
+                    self.upload_file(Some(parent), name, &child_local, &existing, xfer)
                         .await?;
                 } else {
                     tracing::debug!(
@@ -457,7 +506,7 @@ impl Fs for MtpFs {
         Some(self.storage_info.clone())
     }
 
-    fn download_to(&self, path: &TPath, dest: &Path) -> Result<()> {
+    fn download_to_tracked(&self, path: &TPath, dest: &Path, xfer: &Transfer) -> Result<()> {
         let _g = self.op_lock.lock().expect("op_lock poisoned");
         block_on(async {
             let obj = self
@@ -466,15 +515,10 @@ impl Fs for MtpFs {
                 .ok_or_else(|| anyhow!("download: object not found at `{path}`"))?;
             if obj.is_folder() {
                 // Folder drag-out / "Save to…": recreate the subtree locally.
-                self.download_folder(obj.handle, dest).await
+                self.download_folder(obj.handle, dest, xfer).await
             } else {
-                let bytes = self.storage.download(obj.handle).await.map_err(map_err)?;
-                // mtp-rs's current `download` buffers the whole object. For
-                // multi-GB pulls we want a streaming variant — TODO when we add
-                // progress reporting to the drag-out callback.
-                std::fs::write(dest, &bytes)
-                    .with_context(|| format!("write {} ({} bytes)", dest.display(), bytes.len()))?;
-                Ok(())
+                let name = path.name().unwrap_or_default();
+                self.download_file_streaming(obj.handle, dest, name, xfer).await
             }
         })
     }
@@ -489,7 +533,7 @@ impl Fs for MtpFs {
         })
     }
 
-    fn upload_from(&self, src: &Path, dest: &TPath) -> Result<()> {
+    fn upload_from_tracked(&self, src: &Path, dest: &TPath, xfer: &Transfer) -> Result<()> {
         let _g = self.op_lock.lock().expect("op_lock poisoned");
         block_on(async {
             // Directory source (a folder dragged in from Finder): create the
@@ -499,7 +543,7 @@ impl Fs for MtpFs {
             let meta = std::fs::metadata(src)
                 .with_context(|| format!("stat {}", src.display()))?;
             if meta.is_dir() {
-                return self.upload_folder(src, dest).await;
+                return self.upload_folder(src, dest, xfer).await;
             }
 
             let parent_path = dest.parent().unwrap_or_default();
@@ -512,7 +556,7 @@ impl Fs for MtpFs {
                 .list_objects(parent)
                 .await
                 .map_err(map_err)?;
-            self.upload_file(parent, name, src, &existing).await
+            self.upload_file(parent, name, src, &existing, xfer).await
         })
     }
 

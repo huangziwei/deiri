@@ -10,6 +10,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::path::TPath;
+use crate::transfer::Transfer;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Entry {
@@ -76,8 +77,15 @@ pub trait Fs: Send + Sync {
     /// Download `path` to `dest`. If `path` is a file, `dest` is the local file
     /// to write; if it's a folder, `dest` *is* that folder (created if missing)
     /// and the whole subtree is recreated beneath it. Used by the drag-out
-    /// promise callback and the "Save to…" menu.
-    fn download_to(&self, path: &TPath, dest: &Path) -> Result<()>;
+    /// promise callback and file previews.
+    fn download_to(&self, path: &TPath, dest: &Path) -> Result<()> {
+        self.download_to_tracked(path, dest, &Transfer::noop())
+    }
+
+    /// [`download_to`](Self::download_to) with live byte progress reported to
+    /// `xfer.sink` and cancellation polled from `xfer.cancel`. Backs the
+    /// "Save to…" / `download_objects` path.
+    fn download_to_tracked(&self, path: &TPath, dest: &Path, xfer: &Transfer) -> Result<()>;
 
     /// Fetch the thumbnail for the given raw PTP object handle. The id must
     /// come from a previous [`Entry::object_id`] on the *same* session — handles
@@ -90,7 +98,14 @@ pub trait Fs: Send + Sync {
     /// `dest` (nothing visible there if interrupted). If `src` is a directory,
     /// `dest` is created (or merged into if present) and the local tree is
     /// uploaded recursively — colliding files overwritten, symlinks skipped.
-    fn upload_from(&self, src: &Path, dest: &TPath) -> Result<()>;
+    fn upload_from(&self, src: &Path, dest: &TPath) -> Result<()> {
+        self.upload_from_tracked(src, dest, &Transfer::noop())
+    }
+
+    /// [`upload_from`](Self::upload_from) with live byte progress reported to
+    /// `xfer.sink` and cancellation polled from `xfer.cancel`. Backs the
+    /// drag-in / `upload_files` path.
+    fn upload_from_tracked(&self, src: &Path, dest: &TPath, xfer: &Transfer) -> Result<()>;
 
     fn delete(&self, path: &TPath) -> Result<bool>;
     fn delete_dir(&self, path: &TPath) -> Result<bool>;

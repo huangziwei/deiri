@@ -6,11 +6,13 @@
 //! anyhow context chain to JS; the backtrace lives in the log via
 //! `tracing::error!`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
-use mtp_core::{DeviceDescriptor, Entry, FolderSize, Fs, MtpFs, StorageInfo, TPath};
-use serde::Deserialize;
-use tauri::{AppHandle, State};
+use mtp_core::{DeviceDescriptor, Entry, FolderSize, Fs, MtpFs, ProgressSink, StorageInfo, TPath, Transfer};
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
@@ -104,8 +106,163 @@ pub async fn storage_info(state: State<'_, AppState>) -> Result<Option<StorageIn
     state.with_fs(|fs| Ok(fs.storage_info())).map_err(err)
 }
 
+// --------------------------------------------------------------------------
+// Transfers (upload / download) with progress + cancel.
+//
+// Both directions run as one job: a single command loops over the items while
+// `EmitSink` streams throttled `transfer-progress` events to the frontend, and
+// the loop polls `AppState.transfer.cancel` between chunks (see mtp-core's
+// `Transfer`). The frontend mints the job id and passes it in, so its panel can
+// appear and its Cancel button can work before the first byte moves. Drag-OUT
+// to Finder keeps the OS's native copy sheet and doesn't come through here.
+
+/// One progress update for an in-flight transfer, emitted as `transfer-progress`.
+#[derive(Clone, Serialize)]
+struct TransferProgress {
+    job: u64,
+    /// "upload" or "download" — drives the UI label/icon.
+    direction: &'static str,
+    /// Name of the file currently moving.
+    file_name: String,
+    /// 1-based index of the current file across the whole job.
+    file_index: u32,
+    /// Total files in the job, or 0 when unknown (e.g. a download of folders
+    /// whose contents we haven't walked).
+    file_count: u32,
+    /// Bytes transferred for the current file, and its total size.
+    file_bytes: u64,
+    file_total: u64,
+}
+
+/// A [`ProgressSink`] that emits throttled Tauri events. Shared (`&self`) so one
+/// instance threads through a whole multi-file/recursive transfer.
+struct EmitSink {
+    app: AppHandle,
+    job: u64,
+    direction: &'static str,
+    file_count: u32,
+    inner: Mutex<SinkInner>,
+}
+
+struct SinkInner {
+    file_index: u32,
+    name: String,
+    total: u64,
+    /// When we last emitted, to rate-limit the high-frequency byte stream.
+    last_emit: Option<Instant>,
+}
+
+/// Don't flood the IPC channel: at most one progress event per file per this
+/// interval (file-start and file-completion always emit regardless).
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(80);
+
+impl EmitSink {
+    fn new(app: AppHandle, job: u64, direction: &'static str, file_count: u32) -> Self {
+        Self {
+            app,
+            job,
+            direction,
+            file_count,
+            inner: Mutex::new(SinkInner {
+                file_index: 0,
+                name: String::new(),
+                total: 0,
+                last_emit: None,
+            }),
+        }
+    }
+
+    fn emit(&self, file_index: u32, file_name: String, file_total: u64, file_bytes: u64) {
+        let _ = self.app.emit(
+            "transfer-progress",
+            TransferProgress {
+                job: self.job,
+                direction: self.direction,
+                file_name,
+                file_index,
+                file_count: self.file_count,
+                file_bytes,
+                file_total,
+            },
+        );
+    }
+}
+
+impl ProgressSink for EmitSink {
+    fn file_start(&self, name: &str, total: u64) {
+        let (idx, nm, tot) = {
+            let mut g = self.inner.lock().expect("sink lock poisoned");
+            g.file_index += 1;
+            g.name = name.to_string();
+            g.total = total;
+            g.last_emit = Some(Instant::now());
+            (g.file_index, g.name.clone(), g.total)
+        };
+        self.emit(idx, nm, tot, 0); // announce the new file immediately
+    }
+
+    fn file_progress(&self, transferred: u64) {
+        let snapshot = {
+            let mut g = self.inner.lock().expect("sink lock poisoned");
+            let now = Instant::now();
+            let due = match g.last_emit {
+                None => true,
+                Some(t) => now.duration_since(t) >= PROGRESS_INTERVAL,
+            };
+            let complete = g.total > 0 && transferred >= g.total;
+            if !due && !complete {
+                None
+            } else {
+                g.last_emit = Some(now);
+                Some((g.file_index, g.name.clone(), g.total))
+            }
+        };
+        if let Some((idx, nm, tot)) = snapshot {
+            self.emit(idx, nm, tot, transferred); // emit outside the lock
+        }
+    }
+}
+
+/// Count regular files under `paths`, recursing into directories. Cheap local
+/// stat walk used to give uploads an accurate "i of N" up front.
+fn count_local_files(paths: &[PathBuf]) -> u32 {
+    fn walk(p: &Path, acc: &mut u32) {
+        match std::fs::metadata(p) {
+            Ok(m) if m.is_dir() => {
+                if let Ok(rd) = std::fs::read_dir(p) {
+                    for e in rd.flatten() {
+                        walk(&e.path(), acc);
+                    }
+                }
+            }
+            Ok(m) if m.is_file() => *acc += 1,
+            _ => {}
+        }
+    }
+    let mut n = 0;
+    for p in paths {
+        walk(p, &mut n);
+    }
+    n
+}
+
+/// Map a finished transfer's result into the command's. A user cancel surfaces
+/// as an `Err` from the aborted stream, but it isn't a failure to the caller —
+/// swallow it (the UI already knows it cancelled). Always stops tracking the job.
+fn finish_transfer(state: &AppState, job: u64, result: anyhow::Result<()>) -> Result<(), String> {
+    let cancelled = state.cancel_requested();
+    state.end_transfer(job);
+    match result {
+        Ok(()) => Ok(()),
+        Err(_) if cancelled => Ok(()),
+        Err(e) => Err(err(e)),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct UploadFilesArgs {
+    /// Frontend-minted transfer id (also used to cancel).
+    pub job: u64,
     /// Local source paths (from a Finder drop on the WebView).
     pub sources: Vec<PathBuf>,
     /// Destination folder on the device.
@@ -113,21 +270,76 @@ pub struct UploadFilesArgs {
 }
 
 #[tauri::command]
-pub async fn upload_files(args: UploadFilesArgs, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn upload_files(
+    app: AppHandle,
+    args: UploadFilesArgs,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.begin_transfer(args.job);
+    let sink = EmitSink::new(app.clone(), args.job, "upload", count_local_files(&args.sources));
     let dest_dir = TPath::parse(&args.dest_dir);
-    state
-        .with_fs(|fs| {
-            for src in &args.sources {
-                let name = src
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .ok_or_else(|| anyhow::anyhow!("source has no filename: {}", src.display()))?;
-                let dest = dest_dir.join(name);
-                fs.upload_from(src, &dest)?;
-            }
-            Ok(())
-        })
-        .map_err(err)
+    let result = state.with_fs(|fs| {
+        let xfer = Transfer {
+            sink: &sink,
+            cancel: &state.transfer.cancel,
+        };
+        for src in &args.sources {
+            let name = src
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| anyhow::anyhow!("source has no filename: {}", src.display()))?;
+            let dest = dest_dir.join(name);
+            fs.upload_from_tracked(src, &dest, &xfer)?;
+        }
+        Ok(())
+    });
+    finish_transfer(state.inner(), args.job, result)
+}
+
+#[derive(Deserialize)]
+pub struct DownloadObjectsArgs {
+    /// Frontend-minted transfer id (also used to cancel).
+    pub job: u64,
+    /// Object paths on the device.
+    pub sources: Vec<String>,
+    /// Local destination directory; each source is written as `dest_dir/<name>`.
+    pub dest_dir: String,
+    /// File total for the progress UI, or 0 when unknown (folders selected).
+    pub file_count: u32,
+}
+
+#[tauri::command]
+pub async fn download_objects(
+    app: AppHandle,
+    args: DownloadObjectsArgs,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.begin_transfer(args.job);
+    let sink = EmitSink::new(app.clone(), args.job, "download", args.file_count);
+    let dest_root = PathBuf::from(&args.dest_dir);
+    let result = state.with_fs(|fs| {
+        let xfer = Transfer {
+            sink: &sink,
+            cancel: &state.transfer.cancel,
+        };
+        for src in &args.sources {
+            let tp = TPath::parse(src);
+            let name = tp.name().ok_or_else(|| anyhow::anyhow!("empty source path"))?;
+            let dest = dest_root.join(name);
+            fs.download_to_tracked(&tp, &dest, &xfer)?;
+        }
+        Ok(())
+    });
+    finish_transfer(state.inner(), args.job, result)
+}
+
+/// Request cancellation of the running transfer `job`. Touches only atomics
+/// (never the session lock, which the transfer holds), so it returns promptly
+/// while the transfer is mid-flight; the transfer aborts at its next chunk.
+#[tauri::command]
+pub async fn cancel_transfer(job: u64, state: State<'_, AppState>) -> Result<(), String> {
+    state.request_cancel(job);
+    Ok(())
 }
 
 #[derive(Deserialize)]
