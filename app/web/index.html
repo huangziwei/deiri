@@ -96,6 +96,40 @@
         <div class="search-help-row"><code>all:kiki</code><span>search everything, not just this folder</span></div>
         <div class="search-help-row"><code>all:kind:image date:2026-06</code><span>combine any of the above</span></div>
       </div>
+      <div id="shortcuts-help" hidden role="dialog" aria-label="Keyboard shortcuts" aria-modal="true">
+        <div id="shortcuts-card">
+          <div class="sc-head">
+            <span class="sc-title">Keyboard shortcuts</span>
+            <button id="shortcuts-close" type="button" aria-label="Close">×</button>
+          </div>
+          <div class="sc-grid">
+            <div class="sc-col">
+              <div class="sc-section">Navigate</div>
+              <div class="sc-row"><span class="sc-keys"><kbd>↑</kbd> <kbd>↓</kbd></span><span class="sc-desc">Move selection</span></div>
+              <div class="sc-row"><span class="sc-keys"><kbd>←</kbd> <kbd>→</kbd></span><span class="sc-desc">Move in grid view</span></div>
+              <div class="sc-row"><span class="sc-keys"><kbd>Home</kbd> <kbd>End</kbd></span><span class="sc-desc">First / last item</span></div>
+              <div class="sc-row"><span class="sc-keys"><kbd>⌘</kbd><kbd>↑</kbd></span><span class="sc-desc">Enclosing folder</span></div>
+              <div class="sc-row"><span class="sc-keys"><kbd>⌘</kbd><kbd>↓</kbd></span><span class="sc-desc">Open / descend</span></div>
+              <div class="sc-row"><span class="sc-keys"><kbd>⌘</kbd><kbd>[</kbd> <kbd>⌘</kbd><kbd>]</kbd></span><span class="sc-desc">Back / forward</span></div>
+              <div class="sc-row"><span class="sc-keys"><kbd>Space</kbd></span><span class="sc-desc">Quick Look</span></div>
+            </div>
+            <div class="sc-col">
+              <div class="sc-section">Select</div>
+              <div class="sc-row"><span class="sc-keys"><kbd>⇧</kbd><kbd>↑</kbd> <kbd>⇧</kbd><kbd>↓</kbd></span><span class="sc-desc">Extend selection</span></div>
+              <div class="sc-row"><span class="sc-keys"><kbd>⌘</kbd><kbd>A</kbd></span><span class="sc-desc">Select all</span></div>
+              <div class="sc-row"><span class="sc-keys"><kbd>esc</kbd></span><span class="sc-desc">Deselect / close</span></div>
+              <div class="sc-section">Edit</div>
+              <div class="sc-row"><span class="sc-keys"><kbd>↩</kbd></span><span class="sc-desc">Rename</span></div>
+              <div class="sc-row"><span class="sc-keys"><kbd>⌫</kbd></span><span class="sc-desc">Delete</span></div>
+              <div class="sc-row"><span class="sc-keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>N</kbd></span><span class="sc-desc">New folder</span></div>
+              <div class="sc-section">Find &amp; help</div>
+              <div class="sc-row"><span class="sc-keys"><kbd>⌘</kbd><kbd>F</kbd></span><span class="sc-desc">Search — <code>all:</code> = whole device</span></div>
+              <div class="sc-row"><span class="sc-keys"><kbd>?</kbd></span><span class="sc-desc">This list</span></div>
+            </div>
+          </div>
+          <div class="sc-foot">Query syntax: the <kbd>?</kbd> beside the search box · <kbd>?</kbd> or <kbd>esc</kbd> closes</div>
+        </div>
+      </div>
     </main>
     <script src="api.js"></script>
     <script src="main.js"></script>

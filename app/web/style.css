@@ -400,6 +400,101 @@ header {
   padding: 0 4px;
 }
 
+/* Keyboard-shortcuts overview — a centered modal over a dim backdrop, opened by
+   pressing "?". Above every other popover (search-help 20, menus 10). */
+#shortcuts-help {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.28);
+}
+/* Id selector beats the UA `[hidden]` rule — make hiding explicit. */
+#shortcuts-help[hidden] { display: none; }
+#shortcuts-card {
+  width: 560px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #c8c8cc;
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+  padding: 16px 18px 14px;
+  font-size: 12px;
+}
+.sc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.sc-title { font-weight: 600; font-size: 14px; }
+#shortcuts-close {
+  border: none;
+  background: transparent;
+  color: #888;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+}
+#shortcuts-close:hover { background: #f0f0f4; color: #333; }
+.sc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 28px; }
+@media (max-width: 520px) { .sc-grid { grid-template-columns: 1fr; } }
+.sc-section {
+  margin: 12px 0 4px;
+  font-weight: 600;
+  color: #888;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.sc-col > .sc-section:first-child { margin-top: 2px; }
+.sc-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+}
+.sc-keys { flex: 0 0 auto; white-space: nowrap; }
+.sc-desc { color: #555; text-align: right; }
+.sc-foot {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid #ececf0;
+  color: #888;
+  text-align: center;
+  line-height: 1.5;
+}
+#shortcuts-card kbd {
+  display: inline-block;
+  min-width: 15px;
+  padding: 1px 5px;
+  margin: 0 1px;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  text-align: center;
+  color: #333;
+  background: #f4f4f6;
+  border: 1px solid #d0d0d4;
+  border-bottom-width: 2px;
+  border-radius: 4px;
+}
+#shortcuts-card code {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  background: #f0f0f3;
+  border: 1px solid #e2e2e6;
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
 /* Format filter pills — derived from the current folder's file types. Take the
    flexible middle of the header; scroll horizontally if a folder has many. */
 #filter-pills {
@@ -653,6 +748,13 @@ body.col-resizing { cursor: col-resize; }
   #search-help { background: #2e2e32; border-color: #44444a; box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5); }
   .search-help-note, .search-help-row span { color: #b0b0b4; }
   #search-help code { background: #1e1e20; border-color: #3a3a40; }
+  #shortcuts-card { background: #2e2e32; border-color: #44444a; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55); }
+  .sc-title { color: #e8e8ea; }
+  #shortcuts-close:hover { background: #3a3a40; color: #ddd; }
+  .sc-desc { color: #b0b0b4; }
+  .sc-foot { border-top-color: #3a3a40; }
+  #shortcuts-card kbd { background: #1e1e20; border-color: #3a3a40; color: #ccc; }
+  #shortcuts-card code { background: #1e1e20; border-color: #3a3a40; }
   #device-chip-chevron:hover { background: rgba(255, 255, 255, 0.1); }
   #device-chip { background: #2c2c30; border-color: #44444a; color: inherit; }
   #device-chip:hover { background: #34343a; }

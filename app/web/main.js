@@ -34,6 +34,8 @@ const searchStatusEl = $("search-status");
 const searchCancelBtn = $("search-cancel");
 const searchHelpBtn = $("search-help-btn");
 const searchHelp = $("search-help");
+const shortcutsHelp = $("shortcuts-help");
+const shortcutsClose = $("shortcuts-close");
 
 // ---------------------------------------------------------------------------
 // App state
@@ -82,7 +84,17 @@ let renderGen = 0;
 // across re-renders. Cleared on every refreshList — selection only lives
 // inside the current directory listing.
 const selected = new Set();
-let anchorIndex = -1; // for shift-click range; -1 when no anchor
+// Two indices into the rendered `entries`, Finder-style: `anchorIndex` is the
+// fixed end of a Shift range; `cursorIndex` is the lead — the focused row that
+// arrow keys move from. Both are -1 with no selection, and both reset alongside
+// `selected` on every refreshList. See onRowClick / moveSelection.
+let anchorIndex = -1;
+let cursorIndex = -1;
+
+// Set by goUp() (⌘↑) to the folder we're leaving, so the next listing load
+// re-selects it — Finder lands on the child you came from. Consumed once by
+// refreshList; null on every other navigation.
+let pendingSelectName = null;
 
 // Recursively-computed folder sizes, keyed by object_id (stable within a
 // session). Value is { size, path }: size is the literal "calculating" while a
@@ -393,6 +405,11 @@ async function clearOpenDevice() {
 async function refreshList() {
   selected.clear();
   anchorIndex = -1;
+  cursorIndex = -1;
+  // Captured before the await so a concurrent navigation can't apply it to the
+  // wrong listing; applied at the bottom once `entries` exists. See goUp.
+  const selectName = pendingSelectName;
+  pendingSelectName = null;
   // Keep already-computed folder sizes across navigation — they're keyed by
   // object_id, which is stable for the whole session, so a folder's total is
   // still valid when you return to its listing. Only drop entries that were
@@ -415,6 +432,7 @@ async function refreshList() {
   renderFilterPills(); // pills reflect the formats in this folder
   applyFilter();       // derives `entries` from `allEntries` and renders
   renderBreadcrumb();
+  if (selectName) selectEntryByName(selectName);
 }
 
 // ---------------------------------------------------------------------------
@@ -474,6 +492,7 @@ function toggleFilter(ext) {
   // act on rows that just got filtered out.
   selected.clear();
   anchorIndex = -1;
+  cursorIndex = -1;
   renderFilterPills(); // refresh active states
   applyFilter();
 }
@@ -667,6 +686,7 @@ function onRowClick(idx, ev) {
     selected.add(path);
     anchorIndex = idx;
   }
+  cursorIndex = idx; // the clicked row becomes the keyboard lead
   updateSelectionDOM();
 }
 
@@ -678,6 +698,79 @@ function updateSelectionDOM() {
     n.classList.toggle("selected", selected.has(pathFor(n.dataset.name)));
   });
   updateStatusBar(); // selection count drives the status bar
+}
+
+// Keyboard navigation over the rendered `entries`, Finder-style. Arrows move a
+// single-selection lead (`cursorIndex`); Shift+arrow extends a range from
+// `anchorIndex`. `target` is clamped into range, so callers can overshoot (e.g.
+// cursor + a whole grid row) without bounds-checking. A stale anchor — left
+// pointing past the list by a live filter — is clamped here too, so the range
+// loop never indexes off the end.
+function moveSelection(target, extend) {
+  if (entries.length === 0) return;
+  const last = entries.length - 1;
+  const idx = Math.max(0, Math.min(target, last));
+  if (extend) {
+    let a = anchorIndex < 0 ? (cursorIndex < 0 ? idx : cursorIndex) : anchorIndex;
+    a = Math.max(0, Math.min(a, last));
+    anchorIndex = a;
+    selected.clear();
+    for (let i = Math.min(a, idx); i <= Math.max(a, idx); i++) {
+      selected.add(pathFor(entries[i].name));
+    }
+  } else {
+    selected.clear();
+    selected.add(pathFor(entries[idx].name));
+    anchorIndex = idx;
+  }
+  cursorIndex = idx;
+  updateSelectionDOM();
+  scrollEntryIntoView(idx);
+}
+
+// Keep the keyboard lead visible as it moves. `block: "nearest"` scrolls the
+// minimum amount — no jump when the row is already on screen.
+function scrollEntryIntoView(idx) {
+  const root = viewMode === "list" ? listBody : gridEl;
+  root.querySelector(`[data-idx="${idx}"]`)?.scrollIntoView({ block: "nearest" });
+}
+
+// Tiles per row in grid view: count the leading tiles that share the first
+// tile's offsetTop (one grid row) so ↑/↓ can jump a whole row. Recomputed per
+// keypress because the column count is responsive (auto-fill — see style.css).
+function gridColumns() {
+  const tiles = gridEl.querySelectorAll(".tile");
+  if (tiles.length === 0) return 1;
+  const top = tiles[0].offsetTop;
+  let cols = 0;
+  for (const t of tiles) {
+    if (t.offsetTop !== top) break;
+    cols++;
+  }
+  return Math.max(1, cols);
+}
+
+// Select a single entry by name in the current listing and make it the
+// keyboard lead. No-op if the name isn't in the rendered `entries` (e.g. hidden
+// by a format filter). Used by ⌘↑ to land on the folder you came from.
+function selectEntryByName(name) {
+  const idx = entries.findIndex((e) => e.name === name);
+  if (idx < 0) return;
+  selected.clear();
+  selected.add(pathFor(entries[idx].name));
+  anchorIndex = idx;
+  cursorIndex = idx;
+  updateSelectionDOM();
+  scrollEntryIntoView(idx);
+}
+
+// ⌘↑ — navigate to the enclosing folder, re-selecting the one we leave. No-op
+// at the device root.
+function goUp() {
+  if (!cwd) return;
+  const slash = cwd.lastIndexOf("/");
+  pendingSelectName = slash >= 0 ? cwd.slice(slash + 1) : cwd;
+  navigateTo(slash >= 0 ? cwd.slice(0, slash) : "");
 }
 
 // ---------------------------------------------------------------------------
@@ -695,6 +788,7 @@ function onRowContextMenu(idx, ev) {
     selected.clear();
     selected.add(path);
     anchorIndex = idx;
+    cursorIndex = idx;
     updateSelectionDOM();
   }
 
@@ -808,6 +902,7 @@ window.addEventListener("blur", () => {
   hideContextMenu();
   hideDeviceMenu();
   hideSearchHelp();
+  hideShortcutsHelp();
 });
 document.addEventListener("scroll", hideContextMenu, true);
 
@@ -1215,10 +1310,18 @@ function updateFolderSizeCell(entry) {
 // Keyboard
 
 document.addEventListener("keydown", (ev) => {
-  // Don't hijack keys while typing in an input/textarea (we have none yet,
-  // but a future search box would want them).
+  // Don't hijack keys while typing in an input (the search box, inline rename,
+  // the device-name field) — let arrows, Enter, etc. do their text thing there.
   const tag = ev.target?.tagName;
   if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+  // The shortcuts overview is modal: while it's open only "?" and Esc act (they
+  // close it, below). Swallow the rest so list shortcuts don't fire behind the
+  // backdrop; leave OS combos (⌘C, ⌘Q…) untouched.
+  if (!shortcutsHelp.hidden && ev.key !== "?" && ev.key !== "Escape") {
+    if (!ev.metaKey && !ev.ctrlKey) ev.preventDefault();
+    return;
+  }
 
   if ((ev.metaKey || ev.ctrlKey) && ev.shiftKey && ev.key.toLowerCase() === "n") {
     ev.preventDefault(); // Finder's New Folder shortcut
@@ -1226,12 +1329,18 @@ document.addEventListener("keydown", (ev) => {
   } else if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "f") {
     ev.preventDefault(); // Finder's Find
     if (!searchInput.disabled) { searchInput.focus(); searchInput.select(); }
+  } else if (ev.key === "?" && !ev.metaKey && !ev.ctrlKey) {
+    ev.preventDefault(); // toggle the keyboard-shortcuts overview
+    toggleShortcutsHelp();
   } else if ((ev.metaKey || ev.ctrlKey) && ev.key === "a") {
     if (entries.length === 0) return;
     ev.preventDefault();
     selected.clear();
     for (const e of entries) selected.add(pathFor(e.name));
-    anchorIndex = entries.length - 1;
+    // Anchor at the top, lead at the bottom — so a following Shift+↑ shrinks
+    // the all-selection from the end, the way Finder does after ⌘A.
+    anchorIndex = 0;
+    cursorIndex = entries.length - 1;
     updateSelectionDOM();
   } else if ((ev.metaKey || ev.ctrlKey) && ev.key === "[") {
     ev.preventDefault(); // Finder's Back shortcut
@@ -1245,6 +1354,32 @@ document.addEventListener("keydown", (ev) => {
   } else if ((ev.metaKey || ev.ctrlKey) && ev.key === "ArrowDown") {
     ev.preventDefault(); // Finder's ⌘↓ = open / descend
     openSelected();
+  } else if ((ev.metaKey || ev.ctrlKey) && ev.key === "ArrowUp") {
+    ev.preventDefault(); // Finder's ⌘↑ = open the enclosing folder
+    goUp();
+  } else if (
+    !ev.metaKey && !ev.ctrlKey &&
+    (ev.key === "ArrowDown" || ev.key === "ArrowUp" ||
+     ev.key === "ArrowLeft" || ev.key === "ArrowRight" ||
+     ev.key === "Home" || ev.key === "End")
+  ) {
+    if (searchResultMode || !openDeviceId || entries.length === 0) return;
+    // List view has no horizontal axis (no disclosure tree), so leave ←/→ for
+    // its default; only the grid is 2-D.
+    if (viewMode === "list" && (ev.key === "ArrowLeft" || ev.key === "ArrowRight")) return;
+    ev.preventDefault(); // arrows otherwise scroll the container under us
+    const last = entries.length - 1;
+    const cols = viewMode === "grid" ? gridColumns() : 1;
+    let target;
+    switch (ev.key) {
+      case "ArrowDown":  target = cursorIndex < 0 ? 0 : cursorIndex + cols; break;
+      case "ArrowUp":    target = cursorIndex < 0 ? last : cursorIndex - cols; break;
+      case "ArrowRight": target = cursorIndex < 0 ? 0 : cursorIndex + 1; break;
+      case "ArrowLeft":  target = cursorIndex < 0 ? last : cursorIndex - 1; break;
+      case "Home":       target = 0; break;
+      case "End":        target = last; break;
+    }
+    moveSelection(target, ev.shiftKey);
   } else if (ev.key === " ") {
     if (selected.size > 0) {
       ev.preventDefault(); // Quick Look — also stops Space scrolling the list
@@ -1262,12 +1397,14 @@ document.addEventListener("keydown", (ev) => {
       beginRename(idx);
     }
   } else if (ev.key === "Escape") {
+    if (!shortcutsHelp.hidden) { hideShortcutsHelp(); return; } // modal first
     hideContextMenu();
     hideDeviceMenu();
     hideSearchHelp();
     if (selected.size > 0) {
       selected.clear();
       anchorIndex = -1;
+      cursorIndex = -1;
       updateSelectionDOM();
     }
   }
@@ -1911,6 +2048,22 @@ searchInput.addEventListener("keydown", (ev) => {
 // open/close idiom as the device menu (click-away + Esc + window blur close it).
 function hideSearchHelp() { searchHelp.hidden = true; }
 searchHelpBtn.addEventListener("click", () => { searchHelp.hidden = !searchHelp.hidden; });
+
+// Keyboard-shortcuts overview, toggled by "?". Opening it dismisses the other
+// popovers so they don't peek out from under the backdrop.
+function hideShortcutsHelp() { shortcutsHelp.hidden = true; }
+function toggleShortcutsHelp() {
+  if (!shortcutsHelp.hidden) { hideShortcutsHelp(); return; }
+  hideContextMenu();
+  hideDeviceMenu();
+  hideSearchHelp();
+  shortcutsHelp.hidden = false;
+}
+shortcutsClose.addEventListener("click", hideShortcutsHelp);
+// Click on the dim backdrop (the overlay itself, not the card) closes it.
+shortcutsHelp.addEventListener("mousedown", (ev) => {
+  if (ev.target === shortcutsHelp) hideShortcutsHelp();
+});
 
 // ---------------------------------------------------------------------------
 // In-app move by drag (onto a folder row/tile, a breadcrumb crumb, or the chip)
