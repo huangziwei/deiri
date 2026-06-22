@@ -28,11 +28,21 @@ const navForwardBtn = $("nav-forward");
 const filterPillsEl = $("filter-pills");
 const viewListBtn = $("view-list");
 const viewGridBtn = $("view-grid");
+const searchInput = $("search-input");
+const searchStrip = $("search-strip");
+const searchStatusEl = $("search-status");
+const searchCancelBtn = $("search-cancel");
 
 // ---------------------------------------------------------------------------
 // App state
 
 let openDeviceId = null;
+// Search state (see the Search section). `currentFolderQuery` drives the live
+// current-folder filter; the rest back Everywhere (recursive) results.
+let currentFolderQuery = null;
+let searchResultMode = false;
+let searchResults = [];
+let activeSearch = null;
 let cwd = ""; // device-relative, no leading slash
 // `allEntries` is the full listing from the device; `entries` is the
 // filtered-and-sorted view that's actually rendered and index-addressed (so
@@ -165,6 +175,7 @@ function updateDeviceChip() {
   deviceChip.classList.toggle("no-device", !open);
   // Folder creation needs a session to target; gate it on an open device.
   newFolderBtn.disabled = !openDeviceId;
+  searchInput.disabled = !openDeviceId;
 }
 
 function renderDeviceMenu() {
@@ -311,7 +322,12 @@ async function openDevice(d) {
 // first, so navigating after going back drops the old forward branch — exactly
 // like a browser / Finder.
 function navigateTo(path) {
-  if (navIndex >= 0 && navHistory[navIndex] === path) return; // already here
+  const wasResults = searchResultMode;
+  resetSearch(); // navigating clears any search (filter or Everywhere results)
+  if (navIndex >= 0 && navHistory[navIndex] === path) {
+    if (wasResults) refreshList(); // leave results behind, show the same folder
+    return;
+  }
   navHistory = navHistory.slice(0, navIndex + 1);
   navHistory.push(path);
   navIndex = navHistory.length - 1;
@@ -322,6 +338,7 @@ function navigateTo(path) {
 
 function goBack() {
   if (navIndex <= 0) return;
+  resetSearch();
   navIndex--;
   cwd = navHistory[navIndex];
   updateNavButtons();
@@ -330,6 +347,7 @@ function goBack() {
 
 function goForward() {
   if (navIndex >= navHistory.length - 1) return;
+  resetSearch();
   navIndex++;
   cwd = navHistory[navIndex];
   updateNavButtons();
@@ -354,6 +372,7 @@ async function clearOpenDevice() {
   navIndex = -1;
   storageText = "";
   endRename(); // if the device vanished mid-rename, restore the chip
+  resetSearch(); // drop any search filter/results and clear the box
   invalidateFolderSizes(); // session gone — drop its cached sizes
   try {
     await window.api.invoke("close_device");
@@ -461,9 +480,15 @@ function toggleFilter(ext) {
 // everything. When a format filter is active, hide folders too — "show me PDFs"
 // shouldn't leave subfolders cluttering the view; only matching files pass.
 function applyFilter() {
-  entries = activeFilters.size === 0
-    ? allEntries.slice()
-    : allEntries.filter((e) => !e.is_dir && activeFilters.has(extOf(e.name)));
+  let list = allEntries.slice();
+  if (activeFilters.size > 0) {
+    list = list.filter((e) => !e.is_dir && activeFilters.has(extOf(e.name)));
+  }
+  // Live current-folder search composes on top of the format pills.
+  if (currentFolderQuery) {
+    list = list.filter((e) => matchEntry(e, currentFolderQuery));
+  }
+  entries = list;
   renderList();
 }
 
@@ -493,11 +518,16 @@ function sortEntries() {
 }
 
 function renderList() {
+  if (searchResultMode) { renderSearchResults(); return; } // Everywhere results
   sortEntries();
   renderGen++;
 
   if (entries.length === 0 && openDeviceId) {
-    emptyEl.textContent = activeFilters.size > 0 ? "No items match the filter." : "Empty folder.";
+    emptyEl.textContent = currentFolderQuery
+      ? "No matches."
+      : activeFilters.size > 0
+        ? "No items match the filter."
+        : "Empty folder.";
     emptyEl.hidden = false;
   } else {
     emptyEl.hidden = entries.length > 0 || !!openDeviceId;
@@ -836,8 +866,8 @@ async function saveSelectedTo() {
     .map((p) => entries.find((x) => pathFor(x.name) === p))
     .filter(Boolean);
   if (sel.length === 0) return;
-  if (transferActive()) {
-    alert("A transfer is already in progress. Wait for it to finish or cancel it.");
+  if (aLongJobRunning()) {
+    alert("A transfer or search is already in progress. Wait for it to finish or cancel it.");
     return;
   }
   const destDir = await window.api.pickFolder("Save to…");
@@ -871,15 +901,21 @@ function openEntry(entry) {
   else openFile(entry);
 }
 
-async function openFile(entry) {
-  const opening = `Opening ${entry.name}…`;
+function openFile(entry) {
+  return openObjectAt(pathFor(entry.name), entry.object_id, entry.name);
+}
+
+// Open a file by explicit device path — used by the current folder (openFile)
+// and by Everywhere results, whose files live in other folders.
+async function openObjectAt(path, objectId, name) {
+  const opening = `Opening ${name}…`;
   const restore = statusEl.textContent;
   statusEl.textContent = opening;
   try {
-    await window.api.openObject(pathFor(entry.name), entry.object_id);
+    await window.api.openObject(path, objectId);
   } catch (err) {
-    console.error("open failed", entry.name, err);
-    alert(`Couldn't open ${entry.name}:\n\n${err}`);
+    console.error("open failed", name, err);
+    alert(`Couldn't open ${name}:\n\n${err}`);
   } finally {
     // Only clear our transient message if nothing else overwrote it meanwhile.
     if (statusEl.textContent === opening) statusEl.textContent = restore;
@@ -1177,6 +1213,9 @@ document.addEventListener("keydown", (ev) => {
   if ((ev.metaKey || ev.ctrlKey) && ev.shiftKey && ev.key.toLowerCase() === "n") {
     ev.preventDefault(); // Finder's New Folder shortcut
     createFolder();
+  } else if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "f") {
+    ev.preventDefault(); // Finder's Find
+    if (!searchInput.disabled) { searchInput.focus(); searchInput.select(); }
   } else if ((ev.metaKey || ev.ctrlKey) && ev.key === "a") {
     if (entries.length === 0) return;
     ev.preventDefault();
@@ -1437,14 +1476,10 @@ const transferCancelBtn = $("transfer-cancel");
 let transferSeq = 0;
 let activeTransfer = null; // { job, direction, cancelling } while one runs
 
-function transferActive() {
-  return activeTransfer !== null;
-}
-
 // Claim a job and show the bar. Returns the job id, or null if one is already
 // running (the caller should bail).
 function startTransfer(direction) {
-  if (activeTransfer) return null;
+  if (aLongJobRunning()) return null;
   const job = ++transferSeq;
   activeTransfer = { job, direction, cancelling: false };
   transferLabel.textContent = direction === "upload" ? "Preparing upload…" : "Preparing…";
@@ -1510,6 +1545,353 @@ window.api.onDragDrop(async (event) => {
     }
     invalidateAncestorsOf(cwd); // new files grew this folder and its ancestors
     await Promise.all([refreshList(), refreshStorage()]);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Search
+//
+// One query language, one matcher, two scopes. A leading `all:` (or `here:`)
+// sets scope; otherwise the default is the current folder. Current-folder search
+// is a live client-side filter over `allEntries`. Everywhere search runs on
+// Enter: a cancellable backend walk that STREAMS every object as `search-batch`
+// events, matched here and rendered as a flat list with each result's location.
+// Dates/times are matched in UTC to align with the displayed column (the device
+// epoch is wall-clock-as-UTC — see formatModified).
+
+const SEARCH_DAY = 86400;
+const SEARCH_KINDS = {
+  image: new Set(["jpg", "jpeg", "png", "gif", "bmp", "heic", "heif", "webp", "tiff", "tif", "raw", "dng", "cr2", "nef", "arw", "raf", "orf", "rw2"]),
+  video: new Set(["mp4", "mov", "avi", "mkv", "webm", "m4v", "mpg", "mpeg", "wmv", "flv", "3gp"]),
+  audio: new Set(["mp3", "wav", "flac", "aac", "ogg", "oga", "m4a", "wma", "aiff", "opus"]),
+  doc: new Set(["pdf", "doc", "docx", "txt", "rtf", "odt", "md", "ppt", "pptx", "xls", "xlsx", "csv", "pages"]),
+  ebook: new Set(["epub", "mobi", "azw", "azw3", "kfx", "fb2", "cbz", "cbr", "pdf"]),
+};
+
+// --- parsing ---------------------------------------------------------------
+
+function parseQuery(raw) {
+  let s = raw.trim();
+  let scope = "here";
+  const scopeMatch = s.match(/^(all|everywhere|here)\s*:\s*/i);
+  if (scopeMatch) {
+    scope = /^h/i.test(scopeMatch[1]) ? "here" : "all";
+    s = s.slice(scopeMatch[0].length);
+  }
+  const terms = [];
+  const filters = { date: null, time: null, size: null, exts: null, kinds: null, isDir: null };
+  for (const tok of tokenizeQuery(s)) {
+    const m = tok.match(/^([a-z]+):(.*)$/i);
+    if (m && parseField(m[1].toLowerCase(), m[2], filters)) continue;
+    const t = tok.toLowerCase();
+    if (t) terms.push(t);
+  }
+  return { scope, terms, filters };
+}
+
+// Split on whitespace, but keep "quoted phrases" together (for names with spaces).
+function tokenizeQuery(s) {
+  const out = [];
+  const re = /"([^"]*)"|(\S+)/g;
+  let m;
+  while ((m = re.exec(s)) !== null) out.push(m[1] !== undefined ? m[1] : m[2]);
+  return out;
+}
+
+function parseField(field, value, filters) {
+  switch (field) {
+    case "date": { const d = parseDateExpr(value); if (d) { filters.date = d; return true; } return false; }
+    case "time": { const t = parseTimeExpr(value); if (t) { filters.time = t; return true; } return false; }
+    case "size": { const z = parseSizeExpr(value); if (z) { filters.size = z; return true; } return false; }
+    case "ext":
+    case "type": {
+      const e = value.toLowerCase().replace(/^\./, "");
+      if (!e) return false;
+      (filters.exts ??= new Set()).add(e);
+      return true;
+    }
+    case "kind": {
+      const k = value.toLowerCase();
+      if (k === "folder" || k === "dir") { filters.isDir = true; return true; }
+      if (SEARCH_KINDS[k]) { (filters.kinds ??= []).push(k); return true; }
+      return false;
+    }
+    case "is": {
+      const v = value.toLowerCase();
+      if (v === "folder" || v === "dir") { filters.isDir = true; return true; }
+      if (v === "file") { filters.isDir = false; return true; }
+      return false;
+    }
+    default: return false;
+  }
+}
+
+function isQueryActive(q) {
+  const f = q.filters;
+  return q.terms.length > 0 || !!(f.date || f.time || f.size || f.exts || f.kinds) || f.isDir !== null;
+}
+
+function utcMidnight(y, m, d) { return Math.floor(Date.UTC(y, m, d) / 1000); }
+
+// Bounds [from, to) in epoch seconds for a YYYY / YYYY-MM / YYYY-MM-DD period.
+function periodBounds(v) {
+  const ymd = v.match(/^(\d{4})(?:-(\d{1,2})(?:-(\d{1,2}))?)?$/);
+  if (!ymd) return null;
+  const y = +ymd[1], mo = ymd[2] ? +ymd[2] - 1 : null, d = ymd[3] ? +ymd[3] : null;
+  if (d != null) return { from: utcMidnight(y, mo, d), to: utcMidnight(y, mo, d + 1) };
+  if (mo != null) return { from: utcMidnight(y, mo, 1), to: utcMidnight(y, mo + 1, 1) };
+  return { from: utcMidnight(y, 0, 1), to: utcMidnight(y + 1, 0, 1) };
+}
+
+function parseDateExpr(v) {
+  v = v.trim().toLowerCase();
+  const now = new Date();
+  const today = utcMidnight(now.getFullYear(), now.getMonth(), now.getDate());
+  if (v === "today") return { from: today, to: today + SEARCH_DAY };
+  if (v === "yesterday") return { from: today - SEARCH_DAY, to: today };
+  const rel = v.match(/^(\d+)d$/);
+  if (rel) return { from: today - (parseInt(rel[1], 10) - 1) * SEARCH_DAY, to: today + SEARCH_DAY };
+  const op = v.match(/^(>=|<=|>|<)\s*(.+)$/);
+  if (op) {
+    const b = periodBounds(op[2].trim());
+    if (!b) return null;
+    if (op[1] === ">") return { from: b.to, to: Infinity };
+    if (op[1] === ">=") return { from: b.from, to: Infinity };
+    if (op[1] === "<") return { from: -Infinity, to: b.from };
+    return { from: -Infinity, to: b.to }; // <=
+  }
+  const range = v.match(/^(.+?)\.\.(.+)$/);
+  if (range) {
+    const a = periodBounds(range[1].trim()), c = periodBounds(range[2].trim());
+    if (!a || !c) return null;
+    return { from: a.from, to: c.to };
+  }
+  return periodBounds(v);
+}
+
+function parseTimeExpr(v) {
+  const toMin = (s) => {
+    const m = s.trim().match(/^(\d{1,2})(?::(\d{2}))?$/);
+    if (!m) return null;
+    const h = +m[1], mi = m[2] ? +m[2] : 0;
+    if (h > 23 || mi > 59) return null;
+    return { min: h * 60 + mi, hourOnly: m[2] === undefined };
+  };
+  const range = v.trim().match(/^(.+?)\.\.(.+)$/);
+  if (range) {
+    const a = toMin(range[1]), b = toMin(range[2]);
+    if (!a || !b) return null;
+    return { lo: a.min, hi: b.hourOnly ? b.min + 59 : b.min }; // end hour inclusive
+  }
+  const one = toMin(v);
+  if (!one) return null;
+  return one.hourOnly ? { lo: one.min, hi: one.min + 59 } : { lo: one.min, hi: one.min };
+}
+
+function parseSizeExpr(v) {
+  const bytes = (s) => {
+    const m = s.trim().toLowerCase().match(/^(\d+(?:\.\d+)?)\s*(b|kb|mb|gb|k|m|g)?$/);
+    if (!m) return null;
+    const mult = { b: 1, k: 1024, kb: 1024, m: 1048576, mb: 1048576, g: 1073741824, gb: 1073741824 }[m[2] || "b"];
+    return parseFloat(m[1]) * mult;
+  };
+  v = v.trim();
+  const op = v.match(/^(>=|<=|>|<)\s*(.+)$/);
+  if (op) {
+    const n = bytes(op[2]); if (n == null) return null;
+    if (op[1] === ">") return { min: n + 1, max: Infinity };
+    if (op[1] === ">=") return { min: n, max: Infinity };
+    if (op[1] === "<") return { min: 0, max: Math.max(0, n - 1) };
+    return { min: 0, max: n }; // <=
+  }
+  const range = v.match(/^(.+?)\.\.(.+)$/);
+  if (range) {
+    const a = bytes(range[1]), b = bytes(range[2]);
+    if (a == null || b == null) return null;
+    return { min: a, max: b };
+  }
+  const n = bytes(v);
+  return n == null ? null : { min: n, max: Infinity }; // bare size ≈ "at least"
+}
+
+// --- matching --------------------------------------------------------------
+
+function matchTimeOfDay(ts, t) {
+  const d = new Date(ts * 1000);
+  const mins = d.getUTCHours() * 60 + d.getUTCMinutes();
+  return t.lo <= t.hi ? mins >= t.lo && mins <= t.hi : mins >= t.lo || mins <= t.hi;
+}
+
+function matchEntry(e, q) {
+  const name = e.name.toLowerCase();
+  for (const t of q.terms) if (!name.includes(t)) return false;
+  const f = q.filters;
+  if (f.isDir !== null && e.is_dir !== f.isDir) return false;
+  if (f.date && (e.modified_at == null || !(e.modified_at >= f.date.from && e.modified_at < f.date.to))) return false;
+  if (f.time && (e.modified_at == null || !matchTimeOfDay(e.modified_at, f.time))) return false;
+  if (f.size && (e.is_dir || e.size == null || !(e.size >= f.size.min && e.size <= f.size.max))) return false;
+  if (f.exts && (e.is_dir || !f.exts.has(extOf(e.name)))) return false;
+  if (f.kinds) {
+    if (e.is_dir) return false;
+    const ext = extOf(e.name);
+    if (!f.kinds.some((k) => SEARCH_KINDS[k].has(ext))) return false;
+  }
+  return true;
+}
+
+// --- current-folder (live) -------------------------------------------------
+
+function onSearchInput() {
+  const q = parseQuery(searchInput.value);
+  if (q.scope === "all") {
+    // Recursive runs on Enter, not per keystroke — keep showing the folder.
+    currentFolderQuery = null;
+    if (!searchResultMode) applyFilter();
+  } else {
+    if (searchResultMode) exitSearchResults();
+    currentFolderQuery = isQueryActive(q) ? q : null;
+    applyFilter();
+  }
+}
+
+// --- everywhere (recursive) ------------------------------------------------
+
+async function runEverywhereSearch(q) {
+  if (!openDeviceId || aLongJobRunning()) return;
+  const job = ++transferSeq;
+  activeSearch = { job, query: q, cancelling: false };
+  searchResults = [];
+  searchResultMode = true;
+  searchStrip.hidden = false;
+  searchCancelBtn.textContent = "Cancel";
+  searchCancelBtn.disabled = false;
+  searchStatusEl.textContent = "Searching everywhere…  0 found";
+  renderSearchResults();
+  let cancelled = false;
+  try {
+    await window.api.search(job, ""); // whole device
+  } catch (err) {
+    console.error("search failed", err);
+  } finally {
+    cancelled = activeSearch ? activeSearch.cancelling : false;
+    activeSearch = null;
+    renderSearchResults(); // refresh empty-state now that the walk is done
+    const n = searchResults.length;
+    searchStatusEl.textContent =
+      `${cancelled ? "Search cancelled" : "Everywhere"} · ${n} result${n === 1 ? "" : "s"}`;
+    searchCancelBtn.textContent = "Clear";
+    searchCancelBtn.disabled = false;
+  }
+}
+
+window.api.onSearchBatch(({ payload }) => {
+  if (!activeSearch || payload.job !== activeSearch.job) return;
+  // Append only this batch's matches — rebuilding the whole list each batch
+  // would be quadratic over a big walk.
+  const matched = [];
+  for (const e of payload.entries) {
+    if (matchEntry(e, activeSearch.query)) { searchResults.push(e); matched.push(e); }
+  }
+  if (!activeSearch.cancelling) {
+    searchStatusEl.textContent = `Searching everywhere…  ${searchResults.length} found`;
+  }
+  if (matched.length) {
+    emptyEl.hidden = true;
+    for (const e of matched) listBody.appendChild(buildSearchRow(e));
+  }
+});
+
+searchCancelBtn.addEventListener("click", () => {
+  if (activeSearch && !activeSearch.cancelling) {
+    activeSearch.cancelling = true;
+    searchStatusEl.textContent = "Cancelling…";
+    searchCancelBtn.disabled = true;
+    window.api.cancelTransfer(activeSearch.job).catch((e) => console.error("cancel failed", e));
+  } else if (!activeSearch) {
+    clearSearch(); // the button reads "Clear" once the walk has finished
+  }
+});
+
+function buildSearchRow(e) {
+  const tr = document.createElement("tr");
+  tr.className = "search-row";
+
+  const nameTd = document.createElement("td");
+  nameTd.className = "cell-name";
+  const nameLine = document.createElement("div");
+  nameLine.textContent = `${e.is_dir ? "📁" : "📄"} ${e.name}`;
+  const locLine = document.createElement("div");
+  locLine.className = "search-loc search-loc-link";
+  locLine.textContent = e.dir || "device root";
+  locLine.title = "Reveal in folder";
+  locLine.addEventListener("click", (ev) => { ev.stopPropagation(); navigateTo(e.dir); });
+  nameTd.append(nameLine, locLine);
+
+  const sizeTd = document.createElement("td");
+  sizeTd.className = "cell-size";
+  sizeTd.textContent = e.is_dir ? "—" : e.size != null ? humanSize(e.size) : "—";
+  const modTd = document.createElement("td");
+  modTd.className = "cell-modified";
+  modTd.textContent = formatModified(e.modified_at);
+
+  tr.append(nameTd, sizeTd, modTd);
+  tr.addEventListener("dblclick", () => openSearchResult(e));
+  return tr;
+}
+
+function renderSearchResults() {
+  gridEl.hidden = true;
+  listEl.hidden = false;
+  listBody.innerHTML = "";
+  for (const e of searchResults) listBody.appendChild(buildSearchRow(e));
+  const showEmpty = searchResults.length === 0 && !activeSearch;
+  emptyEl.textContent = "No matches.";
+  emptyEl.hidden = !showEmpty;
+}
+
+function openSearchResult(e) {
+  const path = e.dir ? `${e.dir}/${e.name}` : e.name;
+  if (e.is_dir) navigateTo(path); // navigateTo resets search for us
+  else openObjectAt(path, e.object_id, e.name);
+}
+
+// --- exit / reset ----------------------------------------------------------
+
+function exitSearchResults() {
+  if (activeSearch) {
+    window.api.cancelTransfer(activeSearch.job).catch(() => {});
+    activeSearch = null;
+  }
+  searchResultMode = false;
+  searchResults = [];
+  searchStrip.hidden = true;
+}
+
+// Full reset on navigation/device switch: drop results AND the input text.
+function resetSearch() {
+  exitSearchResults();
+  currentFolderQuery = null;
+  searchInput.value = "";
+}
+
+function clearSearch() {
+  resetSearch();
+  applyFilter(); // re-render the current folder (cwd is unchanged)
+}
+
+function aLongJobRunning() {
+  return activeTransfer !== null || activeSearch !== null;
+}
+
+searchInput.addEventListener("input", onSearchInput);
+searchInput.addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") {
+    const q = parseQuery(searchInput.value);
+    if (q.scope === "all" && isQueryActive(q)) { ev.preventDefault(); runEverywhereSearch(q); }
+  } else if (ev.key === "Escape") {
+    ev.preventDefault();
+    clearSearch();
+    searchInput.blur();
   }
 });
 

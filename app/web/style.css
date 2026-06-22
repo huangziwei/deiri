@@ -289,6 +289,59 @@ header {
 #transfer-cancel:hover:not(:disabled) { background: #f0f0f2; }
 #transfer-cancel:disabled { opacity: 0.5; cursor: default; }
 
+/* Search — a header input plus, for Everywhere (recursive) results, a strip
+   above the status bar and per-result location lines. See the search code in
+   main.js. */
+#search-input {
+  flex: 0 0 auto;
+  width: 180px;
+  padding: 3px 9px;
+  border: 1px solid #d5d5da;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 12px;
+  color: inherit;
+}
+#search-input:focus { outline: none; border-color: #0066cc; }
+#search-input:disabled { opacity: 0.5; }
+
+#search-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 12px;
+  border-top: 1px solid #e5e5e8;
+  background: #fafafb;
+  font-size: 12px;
+  min-height: 30px;
+}
+/* Id selector beats the UA `[hidden]` rule — make hiding explicit. */
+#search-strip[hidden] { display: none; }
+#search-status {
+  flex: 1 1 auto;
+  color: #444;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#search-cancel {
+  flex: 0 0 auto;
+  padding: 2px 12px;
+  border: 1px solid #cfcfd4;
+  border-radius: 5px;
+  background: #fff;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+#search-cancel:hover { background: #f0f0f2; }
+
+/* Everywhere result rows: a name plus a clickable location (its folder). */
+#list-body tr.search-row td { vertical-align: top; }
+.search-loc { font-size: 11px; color: #888; margin-top: 1px; }
+.search-loc-link { cursor: pointer; }
+.search-loc-link:hover { text-decoration: underline; color: #0066cc; }
+
 /* Format filter pills — derived from the current folder's file types. Take the
    flexible middle of the header; scroll horizontally if a folder has many. */
 #filter-pills {
@@ -531,6 +584,12 @@ body.col-resizing { cursor: col-resize; }
   #transfer-track { background: rgba(255, 255, 255, 0.12); }
   #transfer-cancel { background: #2c2c30; border-color: #44444a; }
   #transfer-cancel:hover:not(:disabled) { background: #34343a; }
+  #search-input { background: #2c2c30; border-color: #44444a; }
+  #search-input:focus { border-color: #2c7dff; }
+  #search-strip { background: #252528; border-top-color: #36363a; }
+  #search-status { color: #cdcdd0; }
+  #search-cancel { background: #2c2c30; border-color: #44444a; }
+  #search-cancel:hover { background: #34343a; }
   #device-chip-chevron:hover { background: rgba(255, 255, 255, 0.1); }
   #device-chip { background: #2c2c30; border-color: #44444a; color: inherit; }
   #device-chip:hover { background: #34343a; }

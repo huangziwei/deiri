@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use mtp_core::{DeviceDescriptor, Entry, FolderSize, Fs, MtpFs, ProgressSink, StorageInfo, TPath, Transfer};
+use mtp_core::{
+    DeviceDescriptor, Entry, FolderSize, Fs, MtpFs, ProgressSink, StorageInfo, TPath, Transfer,
+    WalkEntry, WalkSink,
+};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -333,13 +336,67 @@ pub async fn download_objects(
     finish_transfer(state.inner(), args.job, result)
 }
 
-/// Request cancellation of the running transfer `job`. Touches only atomics
-/// (never the session lock, which the transfer holds), so it returns promptly
-/// while the transfer is mid-flight; the transfer aborts at its next chunk.
+/// Request cancellation of the running job (transfer or search) `job`. Touches
+/// only atomics (never the session lock, which the running job holds), so it
+/// returns promptly mid-flight; the job aborts at its next chunk/folder.
 #[tauri::command]
 pub async fn cancel_transfer(job: u64, state: State<'_, AppState>) -> Result<(), String> {
     state.request_cancel(job);
     Ok(())
+}
+
+// --------------------------------------------------------------------------
+// Everywhere search — a cancellable subtree walk that streams every object to
+// the frontend, which matches each batch against the query (so the query
+// language lives in one place, JS). Reuses the transfer job/cancel atoms: only
+// one long device job runs at a time since both hold the session lock, and
+// `cancel_transfer` stops either.
+
+#[derive(Clone, Serialize)]
+struct SearchBatch {
+    job: u64,
+    entries: Vec<WalkEntry>,
+}
+
+struct SearchSink {
+    app: AppHandle,
+    job: u64,
+}
+
+impl WalkSink for SearchSink {
+    fn batch(&self, entries: &[WalkEntry]) {
+        let _ = self.app.emit(
+            "search-batch",
+            SearchBatch {
+                job: self.job,
+                entries: entries.to_vec(),
+            },
+        );
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SearchArgs {
+    /// Frontend-minted job id (cancel via `cancel_transfer`).
+    pub job: u64,
+    /// Folder to walk (device-relative; "" = storage root).
+    pub root: String,
+}
+
+#[tauri::command]
+pub async fn search(
+    app: AppHandle,
+    args: SearchArgs,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.begin_transfer(args.job);
+    let sink = SearchSink {
+        app: app.clone(),
+        job: args.job,
+    };
+    let root = TPath::parse(&args.root);
+    let result = state.with_fs(|fs| fs.walk_tree(&root, &sink, &state.transfer.cancel));
+    finish_transfer(state.inner(), args.job, result)
 }
 
 #[derive(Deserialize)]

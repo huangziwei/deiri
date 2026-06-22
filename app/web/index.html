@@ -21,6 +21,9 @@
           </svg>
         </button>
         <div id="filter-pills" role="group" aria-label="Filter by format"></div>
+        <input id="search-input" type="search" spellcheck="false" autocomplete="off"
+               placeholder="Search" aria-label="Search"
+               title="Search this folder. Start with all: to search the whole device." disabled />
         <div id="view-toggle" role="group">
           <button id="view-list" class="active" title="List view">☰</button>
           <button id="view-grid" title="Grid view">▦</button>
@@ -56,6 +59,10 @@
         </div>
         <div id="transfer-track"><div id="transfer-fill"></div></div>
         <button id="transfer-cancel" type="button">Cancel</button>
+      </div>
+      <div id="search-strip" hidden>
+        <span id="search-status"></span>
+        <button id="search-cancel" type="button">Cancel</button>
       </div>
       <footer id="status-bar"><span id="status"></span></footer>
       <div id="dropzone-overlay" hidden>Drop to upload</div>

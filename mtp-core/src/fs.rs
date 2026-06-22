@@ -5,12 +5,14 @@
 //! against an in-memory `MockFs` later.
 
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::Result;
 use serde::Serialize;
 
 use crate::path::TPath;
 use crate::transfer::Transfer;
+use crate::walk::WalkSink;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Entry {
@@ -111,6 +113,15 @@ pub trait Fs: Send + Sync {
     fn delete_dir(&self, path: &TPath) -> Result<bool>;
     fn create_dir(&self, path: &TPath) -> Result<()>;
     fn rename(&self, from: &TPath, to: &TPath) -> Result<()>;
+
+    /// Walk the subtree rooted at `root` (`""` = storage root), pushing every
+    /// object — files and folders, with their containing-folder path — to `sink`
+    /// in batches as folders are listed. Polls `cancel` between folders/batches
+    /// and bails with an `Err` when set. Backs Everywhere search: the app's sink
+    /// streams batches to the UI, which matches them against the query. One
+    /// `GetObjectInfo` round-trip per object (plus an adaptive date probe), so
+    /// it's an explicit, cancellable action — not part of a normal listing.
+    fn walk_tree(&self, root: &TPath, sink: &dyn WalkSink, cancel: &AtomicBool) -> Result<()>;
 
     /// Move the object at `from` into the folder `dest_dir` (device-relative;
     /// empty = storage root), keeping its name. This is a device-side PTP

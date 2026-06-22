@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -30,6 +31,12 @@ use mtp_rs::ptp::{
 use crate::fs::{Entry, FolderSize, Fs, StorageInfo};
 use crate::path::TPath;
 use crate::transfer::Transfer;
+use crate::walk::{WalkEntry, WalkSink};
+
+/// How many walked objects to accumulate before flushing a batch to the
+/// [`WalkSink`]. Small enough that Everywhere search results stream in visibly,
+/// large enough to keep the IPC event rate sane on a big subtree.
+const WALK_BATCH: usize = 64;
 
 /// Upload chunk size. 256 KiB balances allocator churn against syscall
 /// overhead; raise for fewer reads at the cost of bigger transient allocs.
@@ -149,6 +156,30 @@ impl MtpFs {
             }
         }
         Ok(None)
+    }
+
+    /// Resolve an object's best-effort modification date: the `ObjectInfo` field
+    /// (modified, else created), falling back to a `GetObjectPropValue` probe for
+    /// devices that leave the dataset dates empty (PTP cameras). `probe_dates`
+    /// latches off the first time a file yields nothing, bounding the cost to ~2
+    /// round-trips for a device that won't answer — see the long note in
+    /// [`list`](Self::list). PTP datetimes are the device's local wall-clock with
+    /// no reliable timezone; [`datetime_to_unix`] maps that to the epoch the UI
+    /// renders.
+    async fn object_modified_at(
+        &self,
+        session: &PtpSession,
+        o: &ObjectInfo,
+        probe_dates: &mut bool,
+    ) -> Option<i64> {
+        let mut t = o.modified.as_ref().or(o.created.as_ref()).map(datetime_to_unix);
+        if t.is_none() && *probe_dates && o.is_file() {
+            match fetch_object_date(session, o.handle).await {
+                Some(ts) => t = Some(ts),
+                None => *probe_dates = false, // device won't answer; stop probing
+            }
+        }
+        t
     }
 
     /// Recursively download the folder at `root` into the local directory
@@ -379,21 +410,7 @@ impl Fs for MtpFs {
 
             let mut entries = Vec::with_capacity(objects.len());
             for o in objects {
-                // PTP datetimes are the device's local wall-clock with no
-                // reliable timezone (mtp-rs parses but discards any TZ suffix).
-                // See `datetime_to_unix` for how we map that to the epoch the UI
-                // renders. Prefer modified, fall back to created.
-                let mut modified_at = o
-                    .modified
-                    .as_ref()
-                    .or(o.created.as_ref())
-                    .map(datetime_to_unix);
-                if modified_at.is_none() && probe_dates && o.is_file() {
-                    match fetch_object_date(session, o.handle).await {
-                        Some(ts) => modified_at = Some(ts),
-                        None => probe_dates = false, // device won't answer; stop probing
-                    }
-                }
+                let modified_at = self.object_modified_at(session, &o, &mut probe_dates).await;
                 entries.push(Entry {
                     name: o.filename.clone(),
                     is_dir: o.is_folder(),
@@ -520,6 +537,64 @@ impl Fs for MtpFs {
                 let name = path.name().unwrap_or_default();
                 self.download_file_streaming(obj.handle, dest, name, xfer).await
             }
+        })
+    }
+
+    fn walk_tree(&self, root: &TPath, sink: &dyn WalkSink, cancel: &AtomicBool) -> Result<()> {
+        let _g = self.op_lock.lock().expect("op_lock poisoned");
+        block_on(async {
+            let root_handle = if root.is_empty() {
+                None
+            } else {
+                match self.resolve(root).await? {
+                    Some(h) => Some(h),
+                    None => return Ok(()), // root vanished — nothing to walk
+                }
+            };
+            let session = self.device.session();
+            let mut probe_dates = true;
+            // Iterative (explicit stack) like `dir_sizes_by_id`/`download_folder`
+            // so deep trees can't blow the call stack and we hold one `op_lock`
+            // for the whole walk. Each item: (listing arg, that folder's path).
+            let mut stack: Vec<(Option<ObjectHandle>, String)> = vec![(root_handle, root.to_string())];
+            let mut batch: Vec<WalkEntry> = Vec::with_capacity(WALK_BATCH);
+            while let Some((parent, dir)) = stack.pop() {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(anyhow!("search cancelled"));
+                }
+                let children = self.storage.list_objects(parent).await.map_err(map_err)?;
+                for o in children {
+                    let modified_at = self.object_modified_at(session, &o, &mut probe_dates).await;
+                    let is_dir = o.is_folder();
+                    if is_dir {
+                        let child_dir = if dir.is_empty() {
+                            o.filename.clone()
+                        } else {
+                            format!("{dir}/{}", o.filename)
+                        };
+                        stack.push((Some(o.handle), child_dir));
+                    }
+                    batch.push(WalkEntry {
+                        dir: dir.clone(),
+                        name: o.filename.clone(),
+                        is_dir,
+                        size: o.is_file().then_some(o.size),
+                        modified_at,
+                        object_id: o.handle.0,
+                    });
+                    if batch.len() >= WALK_BATCH {
+                        sink.batch(&batch);
+                        batch.clear();
+                        if cancel.load(Ordering::Relaxed) {
+                            return Err(anyhow!("search cancelled"));
+                        }
+                    }
+                }
+            }
+            if !batch.is_empty() {
+                sink.batch(&batch);
+            }
+            Ok(())
         })
     }
 

@@ -44,6 +44,12 @@ window.api = {
   cancelTransfer: (job) => TAURI.core.invoke("cancel_transfer", { job }),
   onTransferProgress: (handler) => TAURI.event.listen("transfer-progress", handler),
 
+  // Everywhere search: walk the subtree under `root`, streaming every object as
+  // `search-batch` events for the frontend to match against the query. Shares
+  // the job/cancel mechanism with transfers — cancel via cancelTransfer(job).
+  search: (job, root) => TAURI.core.invoke("search", { args: { job, root } }),
+  onSearchBatch: (handler) => TAURI.event.listen("search-batch", handler),
+
   // Native folder picker. Returns a string path or null on cancel.
   //
   // We go through our Rust wrapper (`pick_folder`) rather than calling
