@@ -32,6 +32,8 @@ const searchInput = $("search-input");
 const searchStrip = $("search-strip");
 const searchStatusEl = $("search-status");
 const searchCancelBtn = $("search-cancel");
+const searchHelpBtn = $("search-help-btn");
+const searchHelp = $("search-help");
 
 // ---------------------------------------------------------------------------
 // App state
@@ -794,10 +796,18 @@ document.addEventListener("mousedown", (ev) => {
   ) {
     hideDeviceMenu();
   }
+  if (
+    !searchHelp.hidden
+    && !searchHelp.contains(ev.target)
+    && !searchHelpBtn.contains(ev.target)
+  ) {
+    hideSearchHelp();
+  }
 });
 window.addEventListener("blur", () => {
   hideContextMenu();
   hideDeviceMenu();
+  hideSearchHelp();
 });
 document.addEventListener("scroll", hideContextMenu, true);
 
@@ -1254,6 +1264,7 @@ document.addEventListener("keydown", (ev) => {
   } else if (ev.key === "Escape") {
     hideContextMenu();
     hideDeviceMenu();
+    hideSearchHelp();
     if (selected.size > 0) {
       selected.clear();
       anchorIndex = -1;
@@ -1890,10 +1901,16 @@ searchInput.addEventListener("keydown", (ev) => {
     if (q.scope === "all" && isQueryActive(q)) { ev.preventDefault(); runEverywhereSearch(q); }
   } else if (ev.key === "Escape") {
     ev.preventDefault();
+    if (!searchHelp.hidden) { hideSearchHelp(); return; }
     clearSearch();
     searchInput.blur();
   }
 });
+
+// Syntax cheat-sheet popover, toggled by the "?" beside the search box. Same
+// open/close idiom as the device menu (click-away + Esc + window blur close it).
+function hideSearchHelp() { searchHelp.hidden = true; }
+searchHelpBtn.addEventListener("click", () => { searchHelp.hidden = !searchHelp.hidden; });
 
 // ---------------------------------------------------------------------------
 // In-app move by drag (onto a folder row/tile, a breadcrumb crumb, or the chip)

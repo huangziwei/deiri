@@ -24,6 +24,8 @@
         <input id="search-input" type="search" spellcheck="false" autocomplete="off"
                placeholder="Search" aria-label="Search"
                title="Search this folder. Start with all: to search the whole device." disabled />
+        <button id="search-help-btn" type="button" title="Search syntax"
+                aria-label="Search syntax">?</button>
         <div id="view-toggle" role="group">
           <button id="view-list" class="active" title="List view">☰</button>
           <button id="view-grid" title="Grid view">▦</button>
@@ -68,6 +70,32 @@
       <div id="dropzone-overlay" hidden>Drop to upload</div>
       <ul id="context-menu" hidden></ul>
       <div id="device-menu" hidden role="menu"></div>
+      <div id="search-help" hidden role="dialog" aria-label="Search syntax">
+        <div class="search-help-title">Search syntax</div>
+        <p class="search-help-note">
+          Filters combine with AND. Searches this folder by default; start with
+          <code>all:</code> to search the whole device, then press Enter.
+        </p>
+        <div class="search-help-section">Name</div>
+        <div class="search-help-row"><code>kiki</code><span>name contains “kiki” — multiple words must all match</span></div>
+        <div class="search-help-row"><code>"two words"</code><span>quote a phrase that has spaces</span></div>
+        <div class="search-help-section">Date &amp; time</div>
+        <div class="search-help-row"><code>date:today</code><span>today — also <code>yesterday</code>, <code>7d</code> (last 7 days)</span></div>
+        <div class="search-help-row"><code>date:2026-06-21</code><span>a day — or <code>2026-06</code> (month), <code>2026</code> (year)</span></div>
+        <div class="search-help-row"><code>date:2026-06-01..2026-06-21</code><span>a range (full dates both sides)</span></div>
+        <div class="search-help-row"><code>date:&gt;2026-06-01</code><span>after — <code>&lt;</code> for before</span></div>
+        <div class="search-help-row"><code>time:18..21</code><span>recorded 18:00–21:59, any day</span></div>
+        <div class="search-help-section">Size</div>
+        <div class="search-help-row"><code>size:&gt;10mb</code><span>larger than — <code>&lt;500kb</code> for smaller</span></div>
+        <div class="search-help-row"><code>size:1mb..5mb</code><span>a range — units b, kb, mb, gb</span></div>
+        <div class="search-help-section">Type</div>
+        <div class="search-help-row"><code>ext:epub</code><span>by extension — also <code>type:jpg</code></span></div>
+        <div class="search-help-row"><code>kind:image</code><span>image, video, audio, doc, ebook</span></div>
+        <div class="search-help-row"><code>is:folder</code><span>folders only — <code>is:file</code> for files</span></div>
+        <div class="search-help-section">Whole device</div>
+        <div class="search-help-row"><code>all:kiki</code><span>search everything, not just this folder</span></div>
+        <div class="search-help-row"><code>all:kind:image date:2026-06</code><span>combine any of the above</span></div>
+      </div>
     </main>
     <script src="api.js"></script>
     <script src="main.js"></script>

@@ -342,6 +342,64 @@ header {
 .search-loc-link { cursor: pointer; }
 .search-loc-link:hover { text-decoration: underline; color: #0066cc; }
 
+/* "?" button beside the search box + the syntax cheat-sheet popover it toggles. */
+#search-help-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid #d0d0d4;
+  border-radius: 4px;
+  background: #fff;
+  color: #666;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+#search-help-btn:hover { background: #f0f0f4; }
+
+#search-help {
+  position: absolute;
+  top: 44px;
+  right: 12px;
+  width: 360px;
+  max-width: calc(100vw - 24px);
+  max-height: 72vh;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #c8c8cc;
+  border-radius: 8px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.2);
+  padding: 12px 14px;
+  z-index: 20;
+  font-size: 12px;
+}
+/* Id selector beats the UA `[hidden]` rule — make hiding explicit. */
+#search-help[hidden] { display: none; }
+.search-help-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+.search-help-note { margin: 0 0 6px; color: #666; line-height: 1.45; }
+.search-help-section {
+  margin: 11px 0 4px;
+  font-weight: 600;
+  color: #888;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.search-help-row { padding: 3px 0; line-height: 1.45; }
+.search-help-row > code { display: inline-block; margin-bottom: 2px; }
+.search-help-row span { display: block; color: #555; }
+#search-help code {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  background: #f0f0f3;
+  border: 1px solid #e2e2e6;
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
 /* Format filter pills — derived from the current folder's file types. Take the
    flexible middle of the header; scroll horizontally if a folder has many. */
 #filter-pills {
@@ -590,6 +648,11 @@ body.col-resizing { cursor: col-resize; }
   #search-status { color: #cdcdd0; }
   #search-cancel { background: #2c2c30; border-color: #44444a; }
   #search-cancel:hover { background: #34343a; }
+  #search-help-btn { background: #2c2c30; border-color: #44444a; color: #aaa; }
+  #search-help-btn:hover { background: #34343a; }
+  #search-help { background: #2e2e32; border-color: #44444a; box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5); }
+  .search-help-note, .search-help-row span { color: #b0b0b4; }
+  #search-help code { background: #1e1e20; border-color: #3a3a40; }
   #device-chip-chevron:hover { background: rgba(255, 255, 255, 0.1); }
   #device-chip { background: #2c2c30; border-color: #44444a; color: inherit; }
   #device-chip:hover { background: #34343a; }
