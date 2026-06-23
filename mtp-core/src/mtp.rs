@@ -25,7 +25,8 @@ use futures::StreamExt;
 use futures::executor::block_on;
 use mtp_rs::mtp::{MtpDevice, NewObjectInfo, Storage};
 use mtp_rs::ptp::{
-    unpack_string, DateTime, ObjectHandle, ObjectInfo, ObjectPropertyCode, PtpSession, ResponseCode,
+    unpack_string, DateTime, ObjectHandle, ObjectInfo, ObjectPropertyCode, OperationCode,
+    PtpSession, ResponseCode,
 };
 
 use crate::fs::{Entry, FolderSize, Fs, StorageInfo};
@@ -370,6 +371,17 @@ impl MtpFs {
             }
         }
         Ok(())
+    }
+
+    /// Whether the device advertises PTP `CopyObject`. Gates the fast,
+    /// device-side copy path in [`copy_to`](Fs::copy_to); when absent (or for
+    /// folders / renamed copies) we fall back to a download→reupload round-trip.
+    /// Cameras under-report operations, but unlike the date probe a wrong "no"
+    /// here just costs a round-trip, so trusting the advertised set is fine.
+    fn supports_copy(&self) -> bool {
+        self.device
+            .device_info()
+            .supports_operation(OperationCode::CopyObject)
     }
 }
 
@@ -750,6 +762,81 @@ impl Fs for MtpFs {
         })
     }
 
+    fn copy_to(&self, from: &TPath, dest_dir: &TPath, dest_name: &str, xfer: &Transfer) -> Result<()> {
+        let _g = self.op_lock.lock().expect("op_lock poisoned");
+        block_on(async {
+            let src = self
+                .resolve_object(from)
+                .await?
+                .ok_or_else(|| anyhow!("copy: source not found at `{from}`"))?;
+
+            // Destination parent handle. Empty path = storage root.
+            let parent = if dest_dir.is_empty() {
+                None
+            } else {
+                match self.resolve_object(dest_dir).await? {
+                    Some(obj) if obj.is_folder() => Some(obj.handle),
+                    Some(_) => return Err(anyhow!("copy: destination `{dest_dir}` is not a folder")),
+                    None => return Err(anyhow!("copy: destination folder `{dest_dir}` not found")),
+                }
+            };
+
+            // A folder can't be copied into itself or a descendant: the upload
+            // leg would write back into the very subtree the download leg reads.
+            // (We stage locally first, so it wouldn't loop forever — but the
+            // result is still nonsense.) Compare on the normalized path strings.
+            if src.is_folder() {
+                let from_s = from.to_string();
+                let dest_s = dest_dir.to_string();
+                if dest_s == from_s || dest_s.starts_with(&format!("{from_s}/")) {
+                    return Err(anyhow!("can't copy a folder into itself"));
+                }
+            }
+
+            // Never overwrite: refuse if the destination already holds
+            // `dest_name`. The frontend pre-computes a free `… copy` name, but a
+            // guard here keeps the trait honest for any caller.
+            let existing = self.storage.list_objects(parent).await.map_err(map_err)?;
+            if existing.iter().any(|o| o.filename == dest_name) {
+                return Err(anyhow!("`{dest_name}` already exists in the destination folder"));
+            }
+
+            // Fast path: a file copied under its own name on a device that
+            // advertises CopyObject is duplicated device-side — no bytes over the
+            // wire. Bracket it with one file_start/progress pair so the transfer
+            // bar still shows the item.
+            if src.is_file() && src.filename == dest_name && self.supports_copy() {
+                xfer.sink.file_start(dest_name, src.size);
+                let new_parent = parent.unwrap_or(ObjectHandle::ROOT);
+                self.storage
+                    .copy_object(src.handle, new_parent, None)
+                    .await
+                    .map_err(map_err)
+                    .with_context(|| format!("copy {dest_name}"))?;
+                xfer.sink.file_progress(src.size);
+                return Ok(());
+            }
+
+            // Round-trip: stage the object locally, then re-upload it under
+            // `dest_name`. Covers folders, renamed copies (Duplicate), and
+            // devices without CopyObject. The download leg is silent but
+            // cancellable (`cancel_only`) so the bar tracks the upload leg's
+            // bytes with one file_start per file. `stage` wipes the temp tree on
+            // drop — including the `?`-error and cancel paths.
+            let stage = TempStage::new()?;
+            let local = stage.path().join(dest_name);
+            let dl = Transfer::cancel_only(xfer.cancel);
+            if src.is_folder() {
+                self.download_folder(src.handle, &local, &dl).await?;
+                self.upload_folder(&local, &dest_dir.join(dest_name), xfer).await?;
+            } else {
+                self.download_file_streaming(src.handle, &local, dest_name, &dl).await?;
+                self.upload_file(parent, dest_name, &local, &existing, xfer).await?;
+            }
+            Ok(())
+        })
+    }
+
     fn rename(&self, from: &TPath, to: &TPath) -> Result<()> {
         let _g = self.op_lock.lock().expect("op_lock poisoned");
         block_on(async {
@@ -796,6 +883,34 @@ impl Fs for MtpFs {
                 .with_context(|| format!("rename {from} -> {new_name}"))?;
             Ok(())
         })
+    }
+}
+
+/// A scratch directory under the system temp dir that stages an object during a
+/// copy's download→reupload round-trip. Removed on drop, so every exit path —
+/// success, `?`-error, or cancel — cleans up after itself. Copies are serialized
+/// behind `op_lock` and gated to one transfer job at a time, so a single fixed
+/// path is safe; we still wipe it on creation to clear anything a prior crash
+/// left behind.
+struct TempStage(PathBuf);
+
+impl TempStage {
+    fn new() -> Result<Self> {
+        let dir = std::env::temp_dir().join("deiri-copy");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("create copy stage {}", dir.display()))?;
+        Ok(Self(dir))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempStage {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 

@@ -131,4 +131,22 @@ pub trait Fs: Send + Sync {
     /// the same name (we never silently overwrite). Moving into the folder the
     /// object already lives in is a no-op. Used by the drag-onto-breadcrumb move.
     fn move_to(&self, from: &TPath, dest_dir: &TPath) -> Result<()>;
+
+    /// Copy the object at `from` into the folder `dest_dir` (device-relative;
+    /// empty = storage root) under the name `dest_name`. Backs Copy/Paste and
+    /// Duplicate.
+    ///
+    /// Two engines, picked per object:
+    /// * A file copied under its own name on a device that advertises PTP
+    ///   `CopyObject` is duplicated **device-side** — no bytes cross the wire.
+    /// * Everything else (folders, renamed copies like Duplicate's `… copy`, or
+    ///   a device without `CopyObject`) round-trips: the subtree is pulled to a
+    ///   local temp stage and re-uploaded under `dest_name`. CopyObject's
+    ///   recursion into folders is device-defined, so we don't trust it there.
+    ///
+    /// Refuses if `dest_dir` already holds `dest_name` (never overwrites) or if
+    /// a folder would be copied into itself or one of its descendants. Byte
+    /// progress and cancellation flow through `xfer` (only the re-upload leg of
+    /// a round-trip reports bytes; the device-side copy is effectively instant).
+    fn copy_to(&self, from: &TPath, dest_dir: &TPath, dest_name: &str, xfer: &Transfer) -> Result<()>;
 }

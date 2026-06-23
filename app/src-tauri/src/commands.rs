@@ -336,6 +336,54 @@ pub async fn download_objects(
     finish_transfer(state.inner(), args.job, result)
 }
 
+#[derive(Deserialize)]
+pub struct CopyItem {
+    /// Object path on the device to copy.
+    pub source: String,
+    /// Leaf name to give the copy in `dest_dir`. The frontend computes a free
+    /// `… copy` name (Finder-style), so the copy never overwrites a sibling.
+    pub dest_name: String,
+}
+
+#[derive(Deserialize)]
+pub struct CopyObjectsArgs {
+    /// Frontend-minted transfer id (also used to cancel).
+    pub job: u64,
+    /// (source, destination name) pairs, all copied into `dest_dir`.
+    pub items: Vec<CopyItem>,
+    /// Destination folder on the device ("" = storage root).
+    pub dest_dir: String,
+}
+
+/// Copy objects into `dest_dir` under caller-chosen names — backs Copy/Paste and
+/// Duplicate. Each item is a device-side PTP CopyObject when possible, else a
+/// download→reupload round-trip (see [`Fs::copy_to`]). Runs as one cancellable
+/// transfer job. `file_count` is reported as 0 (unknown): the device-side path
+/// ticks one file per item while a folder round-trip ticks one per contained
+/// file, so the UI shows a running count rather than a misleading "i of N".
+#[tauri::command]
+pub async fn copy_objects(
+    app: AppHandle,
+    args: CopyObjectsArgs,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.begin_transfer(args.job);
+    let sink = EmitSink::new(app.clone(), args.job, "copy", 0);
+    let dest_dir = TPath::parse(&args.dest_dir);
+    let result = state.with_fs(|fs| {
+        let xfer = Transfer {
+            sink: &sink,
+            cancel: &state.transfer.cancel,
+        };
+        for item in &args.items {
+            let from = TPath::parse(&item.source);
+            fs.copy_to(&from, &dest_dir, &item.dest_name, &xfer)?;
+        }
+        Ok(())
+    });
+    finish_transfer(state.inner(), args.job, result)
+}
+
 /// Request cancellation of the running job (transfer or search) `job`. Touches
 /// only atomics (never the session lock, which the running job holds), so it
 /// returns promptly mid-flight; the job aborts at its next chunk/folder.

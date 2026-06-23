@@ -626,6 +626,11 @@ tbody tr.selected td { background: #d0e3ff; }
 #grid .tile.drop-target-active { background: #0066cc; }
 #grid .tile.drop-target-active .tile-name { color: #fff; }
 
+/* Pending-cut ghost: items stashed by ⌘X (or the Cut menu) dim until they're
+   pasted (moved) or the cut is cleared. Opacity reads the same in both themes. */
+#list-body tr.cut td { opacity: 0.45; }
+#grid .tile.cut { opacity: 0.45; }
+
 /* Inline rename field (see beginRename). Fills the name cell/tile so the text
    doesn't jump when the label is swapped for the input. */
 .rename-input {

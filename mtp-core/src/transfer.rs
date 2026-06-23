@@ -52,3 +52,17 @@ impl Transfer<'static> {
         }
     }
 }
+
+impl<'a> Transfer<'a> {
+    /// A transfer that reports no byte progress but still polls `cancel`. Used
+    /// for the download leg of an on-device copy's download→reupload fallback:
+    /// the user-visible progress comes from the upload leg (the half that writes
+    /// the new object), so the download leg stays silent to keep one `file_start`
+    /// per copied file — but it must remain cancellable.
+    pub fn cancel_only(cancel: &'a AtomicBool) -> Transfer<'a> {
+        Transfer {
+            sink: &NOOP_SINK,
+            cancel,
+        }
+    }
+}

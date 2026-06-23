@@ -41,6 +41,13 @@ window.api = {
     TAURI.core.invoke("download_objects", {
       args: { job, sources, dest_dir: destDir, file_count: fileCount },
     }),
+  // Copy objects into destDir under caller-chosen names (Paste / Duplicate).
+  // `items` is [{ source, dest_name }]; the dest_name is a pre-computed free
+  // "… copy" name so nothing is overwritten. Device-side CopyObject when the
+  // device supports it, else a download→reupload round-trip. Shares the
+  // transfer job/cancel mechanism — cancel via cancelTransfer(job).
+  copyObjects: (job, items, destDir) =>
+    TAURI.core.invoke("copy_objects", { args: { job, items, dest_dir: destDir } }),
   cancelTransfer: (job) => TAURI.core.invoke("cancel_transfer", { job }),
   onTransferProgress: (handler) => TAURI.event.listen("transfer-progress", handler),
 

@@ -96,6 +96,12 @@ let cursorIndex = -1;
 // refreshList; null on every other navigation.
 let pendingSelectName = null;
 
+// In-app Cut/Copy clipboard: { mode: "cut" | "copy", paths: string[], deviceId }
+// or null. Filled by ⌘C/⌘X, drained by ⌘V/⌘D. Declared here (not in the
+// Clipboard section) because openDevice/clearOpenDevice above reset it. See the
+// "Clipboard (Cut / Copy / Paste / Duplicate)" section for the operations.
+let clipboard = null;
+
 // Recursively-computed folder sizes, keyed by object_id (stable within a
 // session). Value is { size, path }: size is the literal "calculating" while a
 // dir_size call is in flight, or a byte count once it resolves; path is the
@@ -322,6 +328,7 @@ async function openDevice(d) {
   navHistory = [""]; // fresh history rooted at the device's top level
   navIndex = 0;
   emptyEl.hidden = true;
+  clipboard = null; // paths from any prior device are meaningless in a new session
   invalidateFolderSizes(); // new session — old handles (and their sizes) are meaningless
   updateDeviceChip();
   updateNavButtons();
@@ -385,6 +392,7 @@ async function clearOpenDevice() {
   navHistory = [];
   navIndex = -1;
   storageText = "";
+  clipboard = null; // session gone — its object paths no longer resolve
   endRename(); // if the device vanished mid-rename, restore the chip
   resetSearch(); // drop any search filter/results and clear the box
   invalidateFolderSizes(); // session gone — drop its cached sizes
@@ -575,6 +583,7 @@ function renderListView() {
     // Same `data-droppath` contract the breadcrumb crumbs use (see dropTargetAt).
     if (e.is_dir) tr.dataset.droppath = pathFor(e.name);
     if (selected.has(pathFor(e.name))) tr.classList.add("selected");
+    if (isCut(e.name)) tr.classList.add("cut"); // ghosted while a cut is pending
 
     const nameTd = document.createElement("td");
     nameTd.className = "cell-name";
@@ -626,6 +635,7 @@ function buildTile(e, idx) {
   // Folders are move targets — see the matching note in renderListView.
   if (e.is_dir) tile.dataset.droppath = pathFor(e.name);
   if (selected.has(pathFor(e.name))) tile.classList.add("selected");
+  if (isCut(e.name)) tile.classList.add("cut"); // ghosted while a cut is pending
 
   const thumbBox = document.createElement("div");
   thumbBox.className = "tile-thumb";
@@ -764,6 +774,24 @@ function selectEntryByName(name) {
   scrollEntryIntoView(idx);
 }
 
+// Select every listed entry whose name is in `names`, leading at the first.
+// Names not present (e.g. a copy that failed) are skipped. Used after Paste /
+// Duplicate to leave the new copies selected, Finder-style.
+function selectNamesInListing(names) {
+  const want = new Set(names);
+  selected.clear();
+  let firstIdx = -1;
+  entries.forEach((e, idx) => {
+    if (!want.has(e.name)) return;
+    selected.add(pathFor(e.name));
+    if (firstIdx < 0) firstIdx = idx;
+  });
+  anchorIndex = firstIdx;
+  cursorIndex = firstIdx;
+  updateSelectionDOM();
+  if (firstIdx >= 0) scrollEntryIntoView(firstIdx);
+}
+
 // ⌘↑ — navigate to the enclosing folder, re-selecting the one we leave. No-op
 // at the device root.
 function goUp() {
@@ -822,6 +850,12 @@ function onRowContextMenu(idx, ev) {
       onSelect: () => calculateFolderSizes(selectedFolders),
     });
   }
+  // Clipboard actions on the selection. Paste lives on the empty-area menu (it
+  // targets the current folder, not the clicked row) — and on ⌘V.
+  items.push({ separator: true });
+  items.push({ label: count > 1 ? `Copy ${count} items` : "Copy", onSelect: () => setClipboard("copy") });
+  items.push({ label: count > 1 ? `Cut ${count} items` : "Cut", onSelect: () => setClipboard("cut") });
+  items.push({ label: count > 1 ? `Duplicate ${count} items` : "Duplicate", onSelect: duplicateSelected });
   items.push({ separator: true });
   items.push({
     label: count > 1 ? `Delete ${count} items` : "Delete",
@@ -839,9 +873,18 @@ function onEmptyContextMenu(ev) {
   if (ev.target.closest("tr, .tile, thead")) return;
   ev.preventDefault();
   if (!openDeviceId) return;
-  showContextMenu(ev.clientX, ev.clientY, [
-    { label: "New Folder", onSelect: createFolder },
-  ]);
+  const items = [{ label: "New Folder", onSelect: createFolder }];
+  // Paste into the current folder when the clipboard holds items from this
+  // device. Cut reads as "Move … Here" since it relocates rather than copies.
+  if (clipboard && clipboard.deviceId === openDeviceId && !searchResultMode) {
+    const n = clipboard.paths.length;
+    const label = clipboard.mode === "cut"
+      ? (n > 1 ? `Move ${n} Items Here` : "Move Here")
+      : (n > 1 ? `Paste ${n} Items` : "Paste");
+    items.push({ separator: true });
+    items.push({ label, onSelect: pasteClipboard });
+  }
+  showContextMenu(ev.clientX, ev.clientY, items);
 }
 listContainer.addEventListener("contextmenu", onEmptyContextMenu);
 
@@ -1068,6 +1111,166 @@ async function quickLook(entry) {
   } finally {
     if (statusEl.textContent === loading) statusEl.textContent = restore;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard (Cut / Copy / Paste / Duplicate)
+//
+// An in-app clipboard of device-relative object paths, Explorer-style. ⌘C / ⌘X
+// stash the selection (copy survives a paste so you can paste again; cut is
+// consumed by the move). ⌘V pastes into the current folder; ⌘D duplicates the
+// selection in place. The clipboard is bound to the device it was filled on —
+// switching or closing the device clears it, since paths only mean anything
+// within one session.
+//
+// Paste-copy and Duplicate never overwrite: each lands under the first free
+// "name copy" / "name copy N" name in the destination (computed here, applied
+// device-side by copy_objects). Paste-cut is a move (move_object), which refuses
+// a name clash — the unified Replace/Keep-Both/Skip dialog is a separate roadmap
+// item, so for now a clash surfaces as an error rather than a silent overwrite.
+// (`clipboard` itself is declared up in the App-state section.)
+
+// Snapshot the current selection into the clipboard. No-op without a selection.
+function setClipboard(mode) {
+  if (!openDeviceId || selected.size === 0) return;
+  clipboard = { mode, paths: [...selected], deviceId: openDeviceId };
+  updateCutDOM(); // ghost the cut items (and un-ghost anything previously cut)
+}
+
+function clearClipboard() {
+  clipboard = null;
+  updateCutDOM();
+}
+
+// True when `name` in the current folder is a pending cut — drives the .cut
+// ghost. Paths are absolute, so a cut item only ghosts while its own folder is
+// shown; navigating away naturally hides it.
+function isCut(name) {
+  return clipboard?.mode === "cut"
+    && clipboard.deviceId === openDeviceId
+    && clipboard.paths.includes(pathFor(name));
+}
+
+// Repaint the .cut ghost on the rendered rows/tiles without a full rebuild.
+function updateCutDOM() {
+  const nodes = viewMode === "list"
+    ? listBody.querySelectorAll("tr")
+    : gridEl.querySelectorAll(".tile");
+  nodes.forEach((n) => n.classList.toggle("cut", isCut(n.dataset.name)));
+}
+
+// Split a leaf name into [stem, ext] so " copy" can go before the extension.
+// Folders and dotfiles (no real extension) keep the whole name as the stem,
+// matching Finder ("archive.tar.gz" -> "archive.tar copy.gz").
+function splitForCopy(name, isDir) {
+  const dot = name.lastIndexOf(".");
+  if (isDir || dot <= 0) return [name, ""];
+  return [name.slice(0, dot), name.slice(dot)];
+}
+
+// First free name for a copy of `name` in a folder whose lowercased names are
+// `takenLower`: the name itself when free (paste into a folder that lacks it),
+// else "stem copy", "stem copy 2", … Finder-style. The caller adds each result
+// back to `takenLower` so a multi-item batch doesn't collide with itself.
+function uniqueCopyName(name, isDir, takenLower) {
+  if (!takenLower.has(name.toLowerCase())) return name;
+  const [stem, ext] = splitForCopy(name, isDir);
+  let candidate = `${stem} copy${ext}`;
+  if (!takenLower.has(candidate.toLowerCase())) return candidate;
+  for (let n = 2; ; n++) {
+    candidate = `${stem} copy ${n}${ext}`;
+    if (!takenLower.has(candidate.toLowerCase())) return candidate;
+  }
+}
+
+// Build (source, free dest name) items for `sources` landing in `destDir`, then
+// run them as one cancellable copy job. Shared by Paste-copy and Duplicate.
+// `destDir` is always the current folder, so the taken-name set is `allEntries`.
+async function copyItemsInto(sources, destDir) {
+  if (sources.length === 0) return;
+  if (aLongJobRunning()) {
+    alert("A transfer or search is already in progress. Wait for it to finish or cancel it.");
+    return;
+  }
+  const takenLower = new Set(allEntries.map((e) => e.name.toLowerCase()));
+  const items = sources.map((source) => {
+    const leaf = source.split("/").pop();
+    // We know the source's type when it's in the current folder (Duplicate, or
+    // paste into the same folder); otherwise infer file-vs-folder from the name
+    // — it only matters on a name clash, to place " copy" before an extension.
+    const here = allEntries.find((e) => pathFor(e.name) === source);
+    const isDir = here ? here.is_dir : leaf.lastIndexOf(".") <= 0;
+    const destName = uniqueCopyName(leaf, isDir, takenLower);
+    takenLower.add(destName.toLowerCase());
+    return { source, dest_name: destName };
+  });
+
+  const job = startTransfer("copy");
+  if (job === null) return;
+  try {
+    await window.api.copyObjects(job, items, destDir);
+  } catch (err) {
+    console.error("copy failed", err);
+    alert(`Couldn't copy:\n\n${err}`);
+  } finally {
+    endTransfer();
+  }
+  // The new objects grew destDir and its ancestors; refresh listing + storage.
+  invalidateAncestorsOf(destDir);
+  await Promise.all([refreshList(), refreshStorage()]);
+  // Leave the fresh copies selected (Finder-style), but only when the paste
+  // landed in the folder we're still viewing — a copy into another folder via a
+  // future drop shouldn't yank the selection here.
+  if (destDir === cwd) selectNamesInListing(items.map((i) => i.dest_name));
+}
+
+// ⌘D — duplicate the selection in place. Same engine as paste-copy, sourced from
+// the selection and always landing in the current folder (so every name clashes
+// and gets a " copy" suffix).
+function duplicateSelected() {
+  if (selected.size === 0) return;
+  copyItemsInto([...selected], cwd);
+}
+
+// ⌘V — paste the clipboard into the current folder. Copy duplicates (keeping the
+// clipboard for repeat pastes); cut moves (move_object) and is then consumed.
+async function pasteClipboard() {
+  if (!openDeviceId || searchResultMode) return; // no folder context in results
+  if (!clipboard || clipboard.deviceId !== openDeviceId) return;
+  const sources = clipboard.paths;
+  if (sources.length === 0) return;
+
+  if (clipboard.mode === "copy") {
+    await copyItemsInto(sources, cwd);
+    return;
+  }
+
+  // Cut = move into cwd. Skip items already here (their parent is cwd). A move
+  // refuses on a name clash (see move_to) — surface the first error and stop.
+  if (aLongJobRunning()) {
+    alert("A transfer or search is already in progress. Wait for it to finish or cancel it.");
+    return;
+  }
+  const parentOf = (p) => {
+    const slash = p.lastIndexOf("/");
+    return slash >= 0 ? p.slice(0, slash) : "";
+  };
+  const toMove = sources.filter((p) => parentOf(p) !== cwd);
+  clearClipboard(); // a cut is consumed whether or not anything actually moved
+  if (toMove.length === 0) return;
+  for (const source of toMove) {
+    const name = source.split("/").pop();
+    try {
+      await window.api.invoke("move_object", { args: { source, dest_dir: cwd } });
+    } catch (err) {
+      console.error("paste-move failed", source, "→", cwd, err);
+      alert(`Couldn't move ${name}:\n\n${err}`);
+      break;
+    }
+    invalidateAncestorsOf(parentOf(source)); // the source's old chain shrank
+  }
+  invalidateAncestorsOf(cwd); // and the destination chain grew
+  await Promise.all([refreshList(), refreshStorage()]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1342,6 +1545,22 @@ document.addEventListener("keydown", (ev) => {
     anchorIndex = 0;
     cursorIndex = entries.length - 1;
     updateSelectionDOM();
+  } else if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "c") {
+    if (!openDeviceId || searchResultMode || selected.size === 0) return;
+    ev.preventDefault(); // Copy the selection to the in-app clipboard
+    setClipboard("copy");
+  } else if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "x") {
+    if (!openDeviceId || searchResultMode || selected.size === 0) return;
+    ev.preventDefault(); // Cut (move on paste)
+    setClipboard("cut");
+  } else if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "v") {
+    if (!openDeviceId || searchResultMode || !clipboard) return;
+    ev.preventDefault(); // Paste into the current folder
+    pasteClipboard();
+  } else if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "d") {
+    if (!openDeviceId || searchResultMode || selected.size === 0) return;
+    ev.preventDefault(); // Finder's Duplicate
+    duplicateSelected();
   } else if ((ev.metaKey || ev.ctrlKey) && ev.key === "[") {
     ev.preventDefault(); // Finder's Back shortcut
     goBack();
@@ -1648,7 +1867,9 @@ window.api.onTransferProgress(({ payload }) => {
   if (activeTransfer.cancelling) {
     transferLabel.textContent = "Cancelling…";
   } else {
-    const verb = payload.direction === "upload" ? "Uploading" : "Downloading";
+    const verb = payload.direction === "upload" ? "Uploading"
+      : payload.direction === "copy" ? "Copying"
+        : "Downloading";
     transferLabel.textContent = `${verb} ${payload.file_name}`;
   }
   transferCount.textContent =
