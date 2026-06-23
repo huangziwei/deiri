@@ -56,6 +56,9 @@ pub struct MtpFs {
     device: MtpDevice,
     storage: Storage,
     op_lock: Mutex<()>,
+    /// Free/total bytes captured at open. `storage_info()` now re-queries the
+    /// device live (free space moves as files are written), so this is only the
+    /// fallback returned when that fresh GetStorageInfo fails.
     storage_info: StorageInfo,
 }
 
@@ -532,7 +535,25 @@ impl Fs for MtpFs {
     }
 
     fn storage_info(&self) -> Option<StorageInfo> {
-        Some(self.storage_info.clone())
+        // Re-query the device instead of returning the snapshot taken at open:
+        // free space changes as the user uploads / copies / deletes, and the UI
+        // calls this after each such mutation. GetStorageInfo is one cheap PTP
+        // transaction (`Storage::refresh` does the same, but needs `&mut`, which
+        // the shared `&self` storage can't give). On the rare failure, fall back
+        // to the open-time value so the footer shows a stale number, not nothing.
+        let _g = self.op_lock.lock().expect("op_lock poisoned");
+        block_on(async {
+            match self.device.session().get_storage_info(self.storage.id()).await {
+                Ok(info) => Some(StorageInfo {
+                    free_bytes: info.free_space_bytes,
+                    total_bytes: info.max_capacity,
+                }),
+                Err(e) => {
+                    tracing::debug!(error = %e, "GetStorageInfo refresh failed; using cached value");
+                    Some(self.storage_info.clone())
+                }
+            }
+        })
     }
 
     fn download_to_tracked(&self, path: &TPath, dest: &Path, xfer: &Transfer) -> Result<()> {
