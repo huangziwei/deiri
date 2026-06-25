@@ -99,23 +99,32 @@ pub trait Fs: Send + Sync {
     /// Upload `src` to `dest`. If `src` is a file, it's written atomically at
     /// `dest` (nothing visible there if interrupted). If `src` is a directory,
     /// `dest` is created and the local tree is uploaded recursively (symlinks
-    /// skipped). On a top-level name clash the `overwrite` flag decides: replace
-    /// the existing object (a folder is *replaced*, not merged) or refuse. This
-    /// bare form passes `overwrite = true` to preserve the historical
-    /// merge/overwrite contract; the interactive path uses
-    /// [`upload_from_tracked`](Self::upload_from_tracked) with the user's choice.
+    /// skipped). This bare form passes `merge = true` to preserve the historical
+    /// contract (folders merged, colliding files overwritten); the interactive
+    /// path uses [`upload_from_tracked`](Self::upload_from_tracked) with the
+    /// user's choice.
     fn upload_from(&self, src: &Path, dest: &TPath) -> Result<()> {
-        self.upload_from_tracked(src, dest, true, &Transfer::noop())
+        self.upload_from_tracked(src, dest, false, true, &Transfer::noop())
     }
 
     /// [`upload_from`](Self::upload_from) with live byte progress reported to
     /// `xfer.sink` and cancellation polled from `xfer.cancel`. Backs the
-    /// drag-in / `upload_files` path. `overwrite` resolves a top-level name
-    /// clash: `true` replaces the existing object, `false` refuses (never a
-    /// silent overwrite). The frontend supplies a suffixed `dest` leaf for
-    /// "Keep Both", so that case arrives as a non-colliding path.
-    fn upload_from_tracked(&self, src: &Path, dest: &TPath, overwrite: bool, xfer: &Transfer)
-        -> Result<()>;
+    /// drag-in / `upload_files` path.
+    ///
+    /// `overwrite` and `merge` resolve a top-level name clash (the frontend's
+    /// dialog picks one): `overwrite` deletes the existing object and writes
+    /// fresh (Replace); `merge` — folders only — uploads into the existing
+    /// folder, overwriting colliding files (Merge); with neither we refuse
+    /// (never a silent overwrite). On a file, `merge` is treated as `overwrite`.
+    /// "Keep Both" arrives as a suffixed `dest` leaf, so it never collides.
+    fn upload_from_tracked(
+        &self,
+        src: &Path,
+        dest: &TPath,
+        overwrite: bool,
+        merge: bool,
+        xfer: &Transfer,
+    ) -> Result<()>;
 
     fn delete(&self, path: &TPath) -> Result<bool>;
     fn delete_dir(&self, path: &TPath) -> Result<bool>;

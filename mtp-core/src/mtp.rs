@@ -689,8 +689,14 @@ impl Fs for MtpFs {
         })
     }
 
-    fn upload_from_tracked(&self, src: &Path, dest: &TPath, overwrite: bool, xfer: &Transfer)
-        -> Result<()> {
+    fn upload_from_tracked(
+        &self,
+        src: &Path,
+        dest: &TPath,
+        overwrite: bool,
+        merge: bool,
+        xfer: &Transfer,
+    ) -> Result<()> {
         let _g = self.op_lock.lock().expect("op_lock poisoned");
         block_on(async {
             // Directory source (a folder dragged in from Finder): create the
@@ -712,10 +718,14 @@ impl Fs for MtpFs {
 
             if meta.is_dir() {
                 // Resolve a top-level folder clash per the dialog's choice:
-                // Replace deletes the existing subtree and uploads fresh (a
-                // replace, not a merge); Keep Both arrives as a free `dest`
-                // name; without overwrite we refuse rather than silently merge.
+                // Merge combines into the existing folder (colliding files
+                // overwritten); Replace deletes the existing subtree and uploads
+                // fresh; Keep Both arrives as a free `dest` name; with none of
+                // these we refuse rather than silently merge.
                 if let Some(old) = existing.iter().find(|o| o.filename == name) {
+                    if merge {
+                        return self.upload_folder(src, dest, true, xfer).await;
+                    }
                     if !overwrite {
                         return Err(anyhow!("`{name}` already exists in the destination folder"));
                     }
@@ -726,7 +736,9 @@ impl Fs for MtpFs {
                 return self.upload_folder(src, dest, overwrite, xfer).await;
             }
 
-            self.upload_file(parent, name, src, &existing, overwrite, xfer).await
+            // `merge` is folder-only; on a file (including one the UI mis-guessed
+            // as a folder) it means the same as Replace.
+            self.upload_file(parent, name, src, &existing, overwrite || merge, xfer).await
         })
     }
 

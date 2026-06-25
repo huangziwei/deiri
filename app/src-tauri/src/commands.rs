@@ -272,6 +272,9 @@ pub struct UploadItem {
     /// Replace a same-named object already in `dest_dir` (the dialog's
     /// "Replace"). `false` refuses a clash rather than silently overwriting.
     pub overwrite: bool,
+    /// Merge into a same-named folder, overwriting colliding files (the dialog's
+    /// "Merge"; folders only). Ignored — treated as `overwrite` — for a file.
+    pub merge: bool,
 }
 
 #[derive(Deserialize)]
@@ -300,7 +303,7 @@ pub async fn upload_files(
         };
         for item in &args.items {
             let dest = dest_dir.join(&item.dest_name);
-            fs.upload_from_tracked(&item.source, &dest, item.overwrite, &xfer)?;
+            fs.upload_from_tracked(&item.source, &dest, item.overwrite, item.merge, &xfer)?;
         }
         Ok(())
     });

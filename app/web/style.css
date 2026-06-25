@@ -509,7 +509,7 @@ header {
 }
 #conflict-dialog[hidden] { display: none; }
 #conflict-card {
-  width: 420px;
+  width: 460px;
   max-width: calc(100vw - 32px);
   background: #fff;
   border: 1px solid #c8c8cc;
@@ -551,7 +551,7 @@ header {
   user-select: none;
 }
 .cf-apply[hidden] { display: none; }
-.cf-actions { display: flex; align-items: center; gap: 8px; }
+.cf-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .cf-spacer { flex: 1 1 auto; }
 .cf-btn {
   padding: 5px 12px;

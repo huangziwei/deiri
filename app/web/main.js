@@ -43,6 +43,7 @@ const conflictApplyRow = $("conflict-apply");
 const conflictApplyAll = $("conflict-apply-all");
 const conflictApplyCount = $("conflict-apply-count");
 const conflictReplaceBtn = $("conflict-replace");
+const conflictMergeBtn = $("conflict-merge");
 const conflictKeepBtn = $("conflict-keep");
 const conflictSkipBtn = $("conflict-skip");
 const conflictCancelBtn = $("conflict-cancel");
@@ -1149,9 +1150,10 @@ function resolveConflict(action) {
 }
 
 // Ask how to resolve one collision. `remaining` is how many collisions are left
-// to decide (including this one); when >1 we offer "Apply to all". Returns a
-// promise of { action, applyToAll }.
-function showConflictDialog({ name, verb, remaining }) {
+// to decide (including this one); when >1 we offer "Apply to all". `canMerge`
+// shows the Merge button (folder uploads only). Returns a promise of
+// { action, applyToAll }.
+function showConflictDialog({ name, verb, remaining, canMerge }) {
   hideContextMenu();
   hideDeviceMenu();
   hideSearchHelp();
@@ -1162,8 +1164,11 @@ function showConflictDialog({ name, verb, remaining }) {
   conflictMessage.append("An item named ", strong, " already exists here.");
   conflictHint.textContent =
     verb === "upload"
-      ? "Replace overwrites the one on the device. Keep Both uploads a numbered copy."
+      ? canMerge
+        ? "Merge combines the folders. Replace overwrites the one on the device. Keep Both uploads a numbered copy."
+        : "Replace overwrites the one on the device. Keep Both uploads a numbered copy."
       : "Replace overwrites the existing one. Keep Both adds a numbered copy.";
+  conflictMergeBtn.hidden = !canMerge;
   const offerAll = remaining > 1;
   conflictApplyRow.hidden = !offerAll;
   conflictApplyAll.checked = false;
@@ -1176,6 +1181,7 @@ function showConflictDialog({ name, verb, remaining }) {
 }
 
 conflictReplaceBtn.addEventListener("click", () => resolveConflict("replace"));
+conflictMergeBtn.addEventListener("click", () => resolveConflict("merge"));
 conflictKeepBtn.addEventListener("click", () => resolveConflict("keepboth"));
 conflictSkipBtn.addEventListener("click", () => resolveConflict("skip"));
 conflictCancelBtn.addEventListener("click", () => resolveConflict("cancel"));
@@ -1205,13 +1211,17 @@ async function resolveConflicts(items, existingLower, { verb }) {
   for (const it of items) {
     const lower = it.name.toLowerCase();
     if (!taken.has(lower)) {
-      out.push({ ...it, destName: it.name, overwrite: false });
+      out.push({ ...it, destName: it.name, overwrite: false, merge: false });
       taken.add(lower);
       continue;
     }
     let action = sticky;
     if (!action) {
-      const res = await showConflictDialog({ name: it.name, verb, remaining });
+      // Merge only makes sense uploading one folder into another (move/copy
+      // can't combine device-side); the backend coalesces it to Replace if a
+      // sticky "Merge" later lands on a file.
+      const canMerge = verb === "upload" && it.isDir;
+      const res = await showConflictDialog({ name: it.name, verb, remaining, canMerge });
       if (res.action === "cancel") return null;
       action = res.action;
       if (res.applyToAll) sticky = action;
@@ -1219,11 +1229,13 @@ async function resolveConflicts(items, existingLower, { verb }) {
     remaining--;
     if (action === "skip") continue;
     if (action === "replace") {
-      out.push({ ...it, destName: it.name, overwrite: true });
+      out.push({ ...it, destName: it.name, overwrite: true, merge: false });
+    } else if (action === "merge") {
+      out.push({ ...it, destName: it.name, overwrite: false, merge: true });
     } else {
       const free = uniqueCopyName(it.name, it.isDir, taken);
       taken.add(free.toLowerCase());
-      out.push({ ...it, destName: free, overwrite: false });
+      out.push({ ...it, destName: free, overwrite: false, merge: false });
     }
   }
   return out;
@@ -2057,7 +2069,12 @@ window.api.onDragDrop(async (event) => {
     try {
       await window.api.uploadFiles(
         job,
-        resolved.map((r) => ({ source: r.source, dest_name: r.destName, overwrite: r.overwrite })),
+        resolved.map((r) => ({
+          source: r.source,
+          dest_name: r.destName,
+          overwrite: r.overwrite,
+          merge: r.merge,
+        })),
         cwd,
       );
     } catch (err) {

@@ -35,10 +35,11 @@ window.api = {
   // mints `job` so its progress panel and Cancel button work before the first
   // byte moves; the same id cancels it. Progress arrives as `transfer-progress`
   // events. Drag-OUT to Finder uses the OS sheet and isn't routed here.
-  // `items` is [{ source, dest_name, overwrite }]: a local path, the leaf name
-  // to write (suffixed for a "Keep Both" resolution), and whether to replace a
-  // same-named object. The frontend resolves clashes before calling, so the
-  // backend never silently overwrites.
+  // `items` is [{ source, dest_name, overwrite, merge }]: a local path, the leaf
+  // name to write (suffixed for a "Keep Both" resolution), whether to replace a
+  // same-named object, and whether to merge into a same-named folder. The
+  // frontend resolves clashes before calling, so the backend never silently
+  // overwrites.
   uploadFiles: (job, items, destDir) =>
     TAURI.core.invoke("upload_files", { args: { job, items, dest_dir: destDir } }),
   // Move an object into destDir under destName (suffixed for "Keep Both"),
