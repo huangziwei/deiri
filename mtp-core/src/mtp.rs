@@ -260,9 +260,13 @@ impl MtpFs {
         name: &str,
         src: &Path,
         existing: &[ObjectInfo],
+        overwrite: bool,
         xfer: &Transfer<'_>,
     ) -> Result<()> {
         if let Some(old) = existing.iter().find(|o| o.filename == name) {
+            if !overwrite {
+                return Err(anyhow!("`{name}` already exists in the destination folder"));
+            }
             self.storage
                 .delete(old.handle)
                 .await
@@ -311,11 +315,19 @@ impl MtpFs {
     }
 
     /// Recursively upload the local directory `src` into device path `dest`.
-    /// `dest` is created (with any missing ancestors) if absent, or merged into
-    /// if it already exists — files colliding by name are overwritten, matching
-    /// the single-file path. Symlinks and other non-file/non-dir entries are
-    /// skipped. Iterative for the same reasons as [`download_folder`](Self::download_folder).
-    async fn upload_folder(&self, src: &Path, dest: &TPath, xfer: &Transfer<'_>) -> Result<()> {
+    /// `dest` is created (with any missing ancestors) if absent. Symlinks and
+    /// other non-file/non-dir entries are skipped. Callers resolve a top-level
+    /// clash before calling (delete-and-replace, or a fresh `dest` for Keep
+    /// Both), so in practice no entry here collides; `overwrite` is threaded to
+    /// the per-file step only to keep its refuse-vs-replace rule honest.
+    /// Iterative for the same reasons as [`download_folder`](Self::download_folder).
+    async fn upload_folder(
+        &self,
+        src: &Path,
+        dest: &TPath,
+        overwrite: bool,
+        xfer: &Transfer<'_>,
+    ) -> Result<()> {
         let root = self
             .ensure_folder(dest)
             .await?
@@ -363,7 +375,7 @@ impl MtpFs {
                     };
                     stack.push((child_local, child_handle));
                 } else if ftype.is_file() {
-                    self.upload_file(Some(parent), name, &child_local, &existing, xfer)
+                    self.upload_file(Some(parent), name, &child_local, &existing, overwrite, xfer)
                         .await?;
                 } else {
                     tracing::debug!(
@@ -372,6 +384,42 @@ impl MtpFs {
                     );
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Delete the object `root` and its whole subtree if it's a folder, leaves
+    /// first (PTP `DeleteObject` on a non-empty folder is undefined). A lone
+    /// file works too — it just has no children. Backs both `delete_dir` and the
+    /// Replace path of `move_to` / `upload_from_tracked`, and runs under a lock
+    /// the caller already holds.
+    ///
+    /// Enumerates children by HANDLE only. A delete walk needs handles, not
+    /// metadata — and `list_objects` fetches GetObjectInfo per child. Some Kindle
+    /// objects (KFX/KPP render-cache resources under a book's `.sdr`) return an
+    /// empty GetObjectInfo data phase, which fails ObjectInfo parsing
+    /// ("insufficient bytes for u32") and would abort the whole delete.
+    /// `get_object_handles` doesn't read metadata, so it walks them fine.
+    async fn delete_subtree(&self, root: ObjectHandle) -> Result<()> {
+        let mut stack = vec![root];
+        let mut to_delete: Vec<ObjectHandle> = Vec::new();
+        while let Some(h) = stack.pop() {
+            to_delete.push(h);
+            let children = self
+                .device
+                .get_object_handles(self.storage.id(), Some(h))
+                .await
+                .map_err(map_err)?;
+            for ch in children {
+                stack.push(ch);
+            }
+        }
+        for h in to_delete.into_iter().rev() {
+            self.storage
+                .delete(h)
+                .await
+                .map_err(map_err)
+                .with_context(|| format!("delete handle {h:?}"))?;
         }
         Ok(())
     }
@@ -641,7 +689,8 @@ impl Fs for MtpFs {
         })
     }
 
-    fn upload_from_tracked(&self, src: &Path, dest: &TPath, xfer: &Transfer) -> Result<()> {
+    fn upload_from_tracked(&self, src: &Path, dest: &TPath, overwrite: bool, xfer: &Transfer)
+        -> Result<()> {
         let _g = self.op_lock.lock().expect("op_lock poisoned");
         block_on(async {
             // Directory source (a folder dragged in from Finder): create the
@@ -650,10 +699,6 @@ impl Fs for MtpFs {
             // `download_to` branches on the *device* object type.
             let meta = std::fs::metadata(src)
                 .with_context(|| format!("stat {}", src.display()))?;
-            if meta.is_dir() {
-                return self.upload_folder(src, dest, xfer).await;
-            }
-
             let parent_path = dest.parent().unwrap_or_default();
             let name = dest
                 .name()
@@ -664,7 +709,24 @@ impl Fs for MtpFs {
                 .list_objects(parent)
                 .await
                 .map_err(map_err)?;
-            self.upload_file(parent, name, src, &existing, xfer).await
+
+            if meta.is_dir() {
+                // Resolve a top-level folder clash per the dialog's choice:
+                // Replace deletes the existing subtree and uploads fresh (a
+                // replace, not a merge); Keep Both arrives as a free `dest`
+                // name; without overwrite we refuse rather than silently merge.
+                if let Some(old) = existing.iter().find(|o| o.filename == name) {
+                    if !overwrite {
+                        return Err(anyhow!("`{name}` already exists in the destination folder"));
+                    }
+                    self.delete_subtree(old.handle)
+                        .await
+                        .with_context(|| format!("replace `{name}`"))?;
+                }
+                return self.upload_folder(src, dest, overwrite, xfer).await;
+            }
+
+            self.upload_file(parent, name, src, &existing, overwrite, xfer).await
         })
     }
 
@@ -685,42 +747,15 @@ impl Fs for MtpFs {
     }
 
     fn delete_dir(&self, path: &TPath) -> Result<bool> {
-        // PTP `DeleteObject` is one transaction; behavior on non-empty folders
-        // is undefined. Walk children, gather handles preorder, delete leaves
-        // first.
         let _g = self.op_lock.lock().expect("op_lock poisoned");
         block_on(async {
             let root = match self.resolve(path).await? {
                 Some(h) => h,
                 None => return Ok(false),
             };
-            let mut stack = vec![root];
-            let mut to_delete: Vec<ObjectHandle> = Vec::new();
-            while let Some(h) = stack.pop() {
-                to_delete.push(h);
-                // Enumerate children by HANDLE only. A delete walk needs handles,
-                // not metadata — and `list_objects` fetches GetObjectInfo per child.
-                // Some Kindle objects (KFX/KPP render-cache resources under a book's
-                // `.sdr`) return an empty GetObjectInfo data phase, which fails
-                // ObjectInfo parsing ("insufficient bytes for u32") and would abort
-                // the whole delete. `get_object_handles` doesn't read metadata, so it
-                // walks them fine. Recurse on every handle; files return no children.
-                let children = self
-                    .device
-                    .get_object_handles(self.storage.id(), Some(h))
-                    .await
-                    .map_err(map_err)?;
-                for ch in children {
-                    stack.push(ch);
-                }
-            }
-            for h in to_delete.into_iter().rev() {
-                self.storage
-                    .delete(h)
-                    .await
-                    .map_err(map_err)
-                    .with_context(|| format!("delete_dir {path} (handle {h:?})"))?;
-            }
+            self.delete_subtree(root)
+                .await
+                .with_context(|| format!("delete_dir {path}"))?;
             Ok(true)
         })
     }
@@ -733,18 +768,18 @@ impl Fs for MtpFs {
         })
     }
 
-    fn move_to(&self, from: &TPath, dest_dir: &TPath) -> Result<()> {
+    fn move_to(&self, from: &TPath, dest_dir: &TPath, dest_name: &str, overwrite: bool)
+        -> Result<()> {
         let _g = self.op_lock.lock().expect("op_lock poisoned");
         block_on(async {
-            let name = from.name().ok_or_else(|| anyhow!("move: empty source path"))?;
+            let src_name = from.name().ok_or_else(|| anyhow!("move: empty source path"))?;
 
-            // No-op when the destination is the object's current parent. The
-            // breadcrumb only offers ancestors so this shouldn't fire from the
-            // UI, but a same-parent MoveObject is undefined on some devices —
-            // guard it. (`name` above guarantees `from` is non-empty, so
-            // `parent()` is `Some`; root-level files compare against the empty
-            // `dest_dir`, the "move to root" case.)
-            if from.parent().as_ref() == Some(dest_dir) {
+            // No-op only when nothing changes: same folder AND same name. (A
+            // same-folder rename comes through `rename`, not here; and a
+            // same-parent MoveObject is undefined on some devices.) `src_name`
+            // guarantees `from` is non-empty, so `parent()` is `Some`;
+            // root-level objects compare against the empty `dest_dir`.
+            if from.parent().as_ref() == Some(dest_dir) && dest_name == src_name {
                 return Ok(());
             }
 
@@ -764,21 +799,43 @@ impl Fs for MtpFs {
                 }
             };
 
-            // Don't clobber a same-named object already in the destination —
-            // PTP MoveObject's collision behavior is device-defined, so we
-            // refuse rather than risk a silent overwrite or a cryptic failure.
+            // Resolve a clash on `dest_name`. The conflict dialog has already
+            // decided: Replace deletes the colliding object (file or subtree),
+            // Keep Both supplies a free suffixed `dest_name`, Skip never reaches
+            // us. Without overwrite we refuse — PTP MoveObject's collision
+            // behavior is device-defined, so we never risk a silent overwrite.
             let existing = self.storage.list_objects(parent).await.map_err(map_err)?;
-            if existing.iter().any(|o| o.filename == name) {
-                return Err(anyhow!(
-                    "`{name}` already exists in the destination folder"
-                ));
+            if let Some(clash) = existing.iter().find(|o| o.filename == dest_name) {
+                if overwrite {
+                    self.delete_subtree(clash.handle)
+                        .await
+                        .with_context(|| format!("replace `{dest_name}`"))?;
+                } else {
+                    return Err(anyhow!("`{dest_name}` already exists in the destination folder"));
+                }
+            }
+
+            // MoveObject keeps the object's name, so a Keep-Both rename to a
+            // different `dest_name` has to happen first, in the source folder
+            // where that name is free. The handle survives the rename.
+            if dest_name != src_name {
+                if !self.device.supports_rename() {
+                    return Err(anyhow!(
+                        "this device can't rename, so it can't keep both copies of `{src_name}`"
+                    ));
+                }
+                self.storage
+                    .rename(handle, dest_name)
+                    .await
+                    .map_err(map_err)
+                    .with_context(|| format!("rename `{src_name}` to `{dest_name}` before move"))?;
             }
 
             let new_parent = parent.unwrap_or(ObjectHandle::ROOT);
             self.storage
                 .move_object(handle, new_parent, None)
                 .await
-                .map_err(|e| move_refusal(e, name))?;
+                .map_err(|e| move_refusal(e, dest_name))?;
             Ok(())
         })
     }
@@ -849,10 +906,12 @@ impl Fs for MtpFs {
             let dl = Transfer::cancel_only(xfer.cancel);
             if src.is_folder() {
                 self.download_folder(src.handle, &local, &dl).await?;
-                self.upload_folder(&local, &dest_dir.join(dest_name), xfer).await?;
+                // `dest_name` is free here (refused above), so nothing collides;
+                // pass overwrite = false to keep copy's never-overwrite contract.
+                self.upload_folder(&local, &dest_dir.join(dest_name), false, xfer).await?;
             } else {
                 self.download_file_streaming(src.handle, &local, dest_name, &dl).await?;
-                self.upload_file(parent, dest_name, &local, &existing, xfer).await?;
+                self.upload_file(parent, dest_name, &local, &existing, false, xfer).await?;
             }
             Ok(())
         })

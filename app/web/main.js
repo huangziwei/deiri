@@ -36,6 +36,17 @@ const searchHelpBtn = $("search-help-btn");
 const searchHelp = $("search-help");
 const shortcutsHelp = $("shortcuts-help");
 const shortcutsClose = $("shortcuts-close");
+const conflictDialog = $("conflict-dialog");
+const conflictMessage = $("conflict-message");
+const conflictHint = $("conflict-hint");
+const conflictApplyRow = $("conflict-apply");
+const conflictApplyAll = $("conflict-apply-all");
+const conflictApplyCount = $("conflict-apply-count");
+const conflictReplaceBtn = $("conflict-replace");
+const conflictKeepBtn = $("conflict-keep");
+const conflictSkipBtn = $("conflict-skip");
+const conflictCancelBtn = $("conflict-cancel");
+const conflictCloseBtn = $("conflict-close");
 
 // ---------------------------------------------------------------------------
 // App state
@@ -1114,6 +1125,111 @@ async function quickLook(entry) {
 }
 
 // ---------------------------------------------------------------------------
+// Name-conflict resolution
+//
+// One Replace / Keep Both / Skip dialog shared by the three operations that
+// drop an item, under its own name, into a folder that may already hold it: the
+// drag move, paste-cut, and upload. (Paste-copy and Duplicate never prompt —
+// making an extra copy is the whole point, so they auto-suffix instead.) The
+// dialog is a centered modal over a dim backdrop, same idiom as the shortcuts
+// overview; while open it swallows other shortcuts (see the keydown handler).
+// Detection is client-side: the destination's names vs. each item's leaf.
+
+let conflictResolver = null; // resolve() of the in-flight dialog promise, or null
+
+// Finish the open dialog with `action` ("replace" | "keepboth" | "skip" |
+// "cancel"), reporting whether "Apply to all" was ticked (only when offered).
+function resolveConflict(action) {
+  if (!conflictResolver) return;
+  const applyToAll = !conflictApplyRow.hidden && conflictApplyAll.checked;
+  const done = conflictResolver;
+  conflictResolver = null;
+  conflictDialog.hidden = true;
+  done({ action, applyToAll });
+}
+
+// Ask how to resolve one collision. `remaining` is how many collisions are left
+// to decide (including this one); when >1 we offer "Apply to all". Returns a
+// promise of { action, applyToAll }.
+function showConflictDialog({ name, verb, remaining }) {
+  hideContextMenu();
+  hideDeviceMenu();
+  hideSearchHelp();
+  // textContent (not innerHTML) — names are arbitrary and must not be parsed.
+  conflictMessage.textContent = "";
+  const strong = document.createElement("strong");
+  strong.textContent = `“${name}”`;
+  conflictMessage.append("An item named ", strong, " already exists here.");
+  conflictHint.textContent =
+    verb === "upload"
+      ? "Replace overwrites the one on the device. Keep Both uploads a numbered copy."
+      : "Replace overwrites the existing one. Keep Both adds a numbered copy.";
+  const offerAll = remaining > 1;
+  conflictApplyRow.hidden = !offerAll;
+  conflictApplyAll.checked = false;
+  conflictApplyCount.textContent = offerAll ? `Apply to all (${remaining})` : "";
+  conflictDialog.hidden = false;
+  conflictKeepBtn.focus(); // the safe, non-destructive default
+  return new Promise((resolve) => {
+    conflictResolver = resolve;
+  });
+}
+
+conflictReplaceBtn.addEventListener("click", () => resolveConflict("replace"));
+conflictKeepBtn.addEventListener("click", () => resolveConflict("keepboth"));
+conflictSkipBtn.addEventListener("click", () => resolveConflict("skip"));
+conflictCancelBtn.addEventListener("click", () => resolveConflict("cancel"));
+conflictCloseBtn.addEventListener("click", () => resolveConflict("cancel"));
+// Click on the dim backdrop (not the card) cancels the whole operation.
+conflictDialog.addEventListener("mousedown", (ev) => {
+  if (ev.target === conflictDialog) resolveConflict("cancel");
+});
+
+// Resolve every top-level name collision for a batch landing in one folder.
+// Each item carries { name, isDir, ... } (plus whatever the caller acts on,
+// e.g. a source path); `existingLower` is the destination's current names,
+// lowercased (devices fold case). Returns a parallel list of
+// { ...item, destName, overwrite } for the items to act on — Skips dropped — or
+// null if the user cancelled the whole operation. Keep Both reuses Finder-style
+// `uniqueCopyName`, growing `taken` so a batch never collides with itself.
+async function resolveConflicts(items, existingLower, { verb }) {
+  const taken = new Set(existingLower);
+  // Collision count up front (against the original names) for "Apply to all
+  // (N)" — Keep-Both additions can't inflate it.
+  let remaining = items.reduce(
+    (n, it) => (existingLower.has(it.name.toLowerCase()) ? n + 1 : n),
+    0,
+  );
+  const out = [];
+  let sticky = null; // an action chosen with "Apply to all", reused thereafter
+  for (const it of items) {
+    const lower = it.name.toLowerCase();
+    if (!taken.has(lower)) {
+      out.push({ ...it, destName: it.name, overwrite: false });
+      taken.add(lower);
+      continue;
+    }
+    let action = sticky;
+    if (!action) {
+      const res = await showConflictDialog({ name: it.name, verb, remaining });
+      if (res.action === "cancel") return null;
+      action = res.action;
+      if (res.applyToAll) sticky = action;
+    }
+    remaining--;
+    if (action === "skip") continue;
+    if (action === "replace") {
+      out.push({ ...it, destName: it.name, overwrite: true });
+    } else {
+      const free = uniqueCopyName(it.name, it.isDir, taken);
+      taken.add(free.toLowerCase());
+      out.push({ ...it, destName: free, overwrite: false });
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Clipboard (Cut / Copy / Paste / Duplicate)
 //
 // An in-app clipboard of device-relative object paths, Explorer-style. ⌘C / ⌘X
@@ -1125,10 +1241,9 @@ async function quickLook(entry) {
 //
 // Paste-copy and Duplicate never overwrite: each lands under the first free
 // "name copy" / "name copy N" name in the destination (computed here, applied
-// device-side by copy_objects). Paste-cut is a move (move_object), which refuses
-// a name clash — the unified Replace/Keep-Both/Skip dialog is a separate roadmap
-// item, so for now a clash surfaces as an error rather than a silent overwrite.
-// (`clipboard` itself is declared up in the App-state section.)
+// device-side by copy_objects). Paste-cut is a move (move_object); a name clash
+// goes through the shared Replace / Keep Both / Skip dialog (see
+// resolveConflicts). (`clipboard` itself is declared up in the App-state section.)
 
 // Snapshot the current selection into the clipboard. No-op without a selection.
 function setClipboard(mode) {
@@ -1245,8 +1360,8 @@ async function pasteClipboard() {
     return;
   }
 
-  // Cut = move into cwd. Skip items already here (their parent is cwd). A move
-  // refuses on a name clash (see move_to) — surface the first error and stop.
+  // Cut = move into cwd. Skip items already here (their parent is cwd). Name
+  // clashes go through the shared Replace / Keep Both / Skip dialog.
   if (aLongJobRunning()) {
     alert("A transfer or search is already in progress. Wait for it to finish or cancel it.");
     return;
@@ -1256,18 +1371,29 @@ async function pasteClipboard() {
     return slash >= 0 ? p.slice(0, slash) : "";
   };
   const toMove = sources.filter((p) => parentOf(p) !== cwd);
-  clearClipboard(); // a cut is consumed whether or not anything actually moved
-  if (toMove.length === 0) return;
-  for (const source of toMove) {
-    const name = source.split("/").pop();
+  if (toMove.length === 0) {
+    clearClipboard();
+    return;
+  }
+  // Cut items live outside cwd, so infer is_dir from the leaf (only affects
+  // Keep-Both naming). Resolve clashes against the current folder.
+  const existingLower = new Set(allEntries.map((e) => e.name.toLowerCase()));
+  const items = toMove.map((p) => {
+    const name = p.split("/").pop();
+    return { source: p, name, isDir: name.lastIndexOf(".") <= 0 };
+  });
+  const resolved = await resolveConflicts(items, existingLower, { verb: "move" });
+  if (resolved === null) return; // cancelled — keep the clipboard for a retry
+  clearClipboard(); // committing to the move consumes the cut (even if all skipped)
+  for (const r of resolved) {
     try {
-      await window.api.invoke("move_object", { args: { source, dest_dir: cwd } });
+      await window.api.moveObject(r.source, cwd, r.destName, r.overwrite);
     } catch (err) {
-      console.error("paste-move failed", source, "→", cwd, err);
-      alert(`Couldn't move ${name}:\n\n${err}`);
+      console.error("paste-move failed", r.source, "→", cwd, err);
+      alert(`Couldn't move ${r.name}:\n\n${err}`);
       break;
     }
-    invalidateAncestorsOf(parentOf(source)); // the source's old chain shrank
+    invalidateAncestorsOf(parentOf(r.source)); // the source's old chain shrank
   }
   invalidateAncestorsOf(cwd); // and the destination chain grew
   await Promise.all([refreshList(), refreshStorage()]);
@@ -1513,6 +1639,16 @@ function updateFolderSizeCell(entry) {
 // Keyboard
 
 document.addEventListener("keydown", (ev) => {
+  // The conflict dialog is modal and may hold focus on its checkbox (an INPUT),
+  // so handle it before the input guard below. Enter = Keep Both (the focused
+  // default), Esc = cancel; swallow the rest so nothing fires behind it.
+  if (!conflictDialog.hidden) {
+    if (ev.key === "Enter") { ev.preventDefault(); resolveConflict("keepboth"); }
+    else if (ev.key === "Escape") { ev.preventDefault(); resolveConflict("cancel"); }
+    else if (!ev.metaKey && !ev.ctrlKey) ev.preventDefault();
+    return;
+  }
+
   // Don't hijack keys while typing in an input (the search box, inline rename,
   // the device-name field) — let arrows, Enter, etc. do their text thing there.
   const tag = ev.target?.tagName;
@@ -1902,10 +2038,28 @@ window.api.onDragDrop(async (event) => {
   } else if (payload.type === "drop") {
     dropzone.hidden = true;
     if (!openDeviceId || internalDragInProgress) return;
+    if (aLongJobRunning()) {
+      alert("A transfer or search is already in progress. Wait for it to finish or cancel it.");
+      return;
+    }
+    // Resolve clashes against the current folder before claiming the transfer.
+    // Finder hands us only paths, so is_dir is inferred from the leaf — it only
+    // steers where " copy" lands on a Keep-Both rename.
+    const existingLower = new Set(allEntries.map((e) => e.name.toLowerCase()));
+    const dropped = payload.paths.map((p) => {
+      const name = p.split("/").pop();
+      return { source: p, name, isDir: name.lastIndexOf(".") <= 0 };
+    });
+    const resolved = await resolveConflicts(dropped, existingLower, { verb: "upload" });
+    if (!resolved || resolved.length === 0) return;
     const job = startTransfer("upload");
-    if (job === null) return; // a transfer is already running
+    if (job === null) return; // a transfer slipped in
     try {
-      await window.api.uploadFiles(job, payload.paths, cwd);
+      await window.api.uploadFiles(
+        job,
+        resolved.map((r) => ({ source: r.source, dest_name: r.destName, overwrite: r.overwrite })),
+        cwd,
+      );
     } catch (err) {
       console.error("upload failed", err);
       alert(`Upload failed: ${err}`);
@@ -2324,10 +2478,31 @@ function clearDropHighlight() {
 
 async function commitMove(sourcePath, destDir) {
   const name = sourcePath.split("/").pop();
+  // The drop target is usually NOT the folder we're viewing (a sub-folder row,
+  // an ancestor crumb, or the root chip), so fetch its listing to detect a
+  // clash. `cwd` is the rare exception and reuses the in-memory listing.
+  let destNamesLower;
   try {
-    await window.api.invoke("move_object", {
-      args: { source: sourcePath, dest_dir: destDir },
-    });
+    const listing =
+      destDir === cwd ? allEntries : await window.api.invoke("list_dir", { path: destDir });
+    destNamesLower = new Set(listing.map((e) => e.name.toLowerCase()));
+  } catch (err) {
+    console.error("move: couldn't read destination", destDir, err);
+    alert(`Couldn't move ${name}:\n\n${err}`);
+    return;
+  }
+  // is_dir is known when the source is in the current listing; else infer it.
+  const here = allEntries.find((e) => pathFor(e.name) === sourcePath);
+  const isDir = here ? here.is_dir : name.lastIndexOf(".") <= 0;
+  const resolved = await resolveConflicts(
+    [{ source: sourcePath, name, isDir }],
+    destNamesLower,
+    { verb: "move" },
+  );
+  if (!resolved || resolved.length === 0) return;
+  const r = resolved[0];
+  try {
+    await window.api.moveObject(r.source, destDir, r.destName, r.overwrite);
   } catch (err) {
     console.error("move failed", sourcePath, "→", destDir, err);
     alert(`Couldn't move ${name}:\n\n${err}`);

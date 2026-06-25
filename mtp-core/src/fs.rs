@@ -98,16 +98,24 @@ pub trait Fs: Send + Sync {
 
     /// Upload `src` to `dest`. If `src` is a file, it's written atomically at
     /// `dest` (nothing visible there if interrupted). If `src` is a directory,
-    /// `dest` is created (or merged into if present) and the local tree is
-    /// uploaded recursively — colliding files overwritten, symlinks skipped.
+    /// `dest` is created and the local tree is uploaded recursively (symlinks
+    /// skipped). On a top-level name clash the `overwrite` flag decides: replace
+    /// the existing object (a folder is *replaced*, not merged) or refuse. This
+    /// bare form passes `overwrite = true` to preserve the historical
+    /// merge/overwrite contract; the interactive path uses
+    /// [`upload_from_tracked`](Self::upload_from_tracked) with the user's choice.
     fn upload_from(&self, src: &Path, dest: &TPath) -> Result<()> {
-        self.upload_from_tracked(src, dest, &Transfer::noop())
+        self.upload_from_tracked(src, dest, true, &Transfer::noop())
     }
 
     /// [`upload_from`](Self::upload_from) with live byte progress reported to
     /// `xfer.sink` and cancellation polled from `xfer.cancel`. Backs the
-    /// drag-in / `upload_files` path.
-    fn upload_from_tracked(&self, src: &Path, dest: &TPath, xfer: &Transfer) -> Result<()>;
+    /// drag-in / `upload_files` path. `overwrite` resolves a top-level name
+    /// clash: `true` replaces the existing object, `false` refuses (never a
+    /// silent overwrite). The frontend supplies a suffixed `dest` leaf for
+    /// "Keep Both", so that case arrives as a non-colliding path.
+    fn upload_from_tracked(&self, src: &Path, dest: &TPath, overwrite: bool, xfer: &Transfer)
+        -> Result<()>;
 
     fn delete(&self, path: &TPath) -> Result<bool>;
     fn delete_dir(&self, path: &TPath) -> Result<bool>;
@@ -124,13 +132,22 @@ pub trait Fs: Send + Sync {
     fn walk_tree(&self, root: &TPath, sink: &dyn WalkSink, cancel: &AtomicBool) -> Result<()>;
 
     /// Move the object at `from` into the folder `dest_dir` (device-relative;
-    /// empty = storage root), keeping its name. This is a device-side PTP
+    /// empty = storage root) under the name `dest_name`. A device-side PTP
     /// `MoveObject` — nothing is transferred over the wire, so it's cheap even
-    /// for large files and whole folder subtrees. Errors if `from` is missing,
-    /// `dest_dir` isn't a folder, or the destination already holds an object of
-    /// the same name (we never silently overwrite). Moving into the folder the
-    /// object already lives in is a no-op. Used by the drag-onto-breadcrumb move.
-    fn move_to(&self, from: &TPath, dest_dir: &TPath) -> Result<()>;
+    /// for large files and whole folder subtrees.
+    ///
+    /// `dest_name` is normally the source's own leaf; a *different* name is the
+    /// "Keep Both" case, which `MoveObject` can't express in one step (it keeps
+    /// the object's name), so the object is renamed in its source folder first
+    /// and then moved — this needs `supports_rename`.
+    ///
+    /// On a name clash in the destination, `overwrite` decides: `true` deletes
+    /// the colliding object (file or whole subtree) first, `false` refuses (we
+    /// never silently overwrite). Errors if `from` is missing or `dest_dir`
+    /// isn't a folder. Moving an object to its current folder under its current
+    /// name is a no-op. Backs the drag move and paste-cut.
+    fn move_to(&self, from: &TPath, dest_dir: &TPath, dest_name: &str, overwrite: bool)
+        -> Result<()>;
 
     /// Copy the object at `from` into the folder `dest_dir` (device-relative;
     /// empty = storage root) under the name `dest_name`. Backs Copy/Paste and

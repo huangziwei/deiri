@@ -133,6 +133,27 @@
           <div class="sc-foot">Query syntax: the <kbd>?</kbd> beside the search box · <kbd>?</kbd> or <kbd>esc</kbd> closes</div>
         </div>
       </div>
+      <div id="conflict-dialog" hidden role="dialog" aria-label="Name conflict" aria-modal="true">
+        <div id="conflict-card">
+          <div class="cf-head">
+            <span class="cf-title">An item already exists</span>
+            <button id="conflict-close" type="button" aria-label="Cancel">×</button>
+          </div>
+          <p id="conflict-message" class="cf-message"></p>
+          <p id="conflict-hint" class="cf-hint"></p>
+          <label id="conflict-apply" class="cf-apply" hidden>
+            <input type="checkbox" id="conflict-apply-all" />
+            <span id="conflict-apply-count">Apply to all</span>
+          </label>
+          <div class="cf-actions">
+            <button id="conflict-cancel" type="button" class="cf-btn">Cancel</button>
+            <span class="cf-spacer"></span>
+            <button id="conflict-skip" type="button" class="cf-btn">Skip</button>
+            <button id="conflict-replace" type="button" class="cf-btn cf-danger">Replace</button>
+            <button id="conflict-keep" type="button" class="cf-btn cf-primary">Keep Both</button>
+          </div>
+        </div>
+      </div>
     </main>
     <script src="api.js"></script>
     <script src="main.js"></script>

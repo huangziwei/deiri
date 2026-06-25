@@ -226,9 +226,9 @@ impl ProgressSink for EmitSink {
     }
 }
 
-/// Count regular files under `paths`, recursing into directories. Cheap local
+/// Count regular files under `items`, recursing into directories. Cheap local
 /// stat walk used to give uploads an accurate "i of N" up front.
-fn count_local_files(paths: &[PathBuf]) -> u32 {
+fn count_local_files(items: &[UploadItem]) -> u32 {
     fn walk(p: &Path, acc: &mut u32) {
         match std::fs::metadata(p) {
             Ok(m) if m.is_dir() => {
@@ -243,8 +243,8 @@ fn count_local_files(paths: &[PathBuf]) -> u32 {
         }
     }
     let mut n = 0;
-    for p in paths {
-        walk(p, &mut n);
+    for item in items {
+        walk(&item.source, &mut n);
     }
     n
 }
@@ -263,11 +263,23 @@ fn finish_transfer(state: &AppState, job: u64, result: anyhow::Result<()>) -> Re
 }
 
 #[derive(Deserialize)]
+pub struct UploadItem {
+    /// Local source path (from a Finder drop on the WebView).
+    pub source: PathBuf,
+    /// Leaf name to write in `dest_dir`. Usually the source's own filename; a
+    /// suffixed name is the frontend's "Keep Both" resolution of a clash.
+    pub dest_name: String,
+    /// Replace a same-named object already in `dest_dir` (the dialog's
+    /// "Replace"). `false` refuses a clash rather than silently overwriting.
+    pub overwrite: bool,
+}
+
+#[derive(Deserialize)]
 pub struct UploadFilesArgs {
     /// Frontend-minted transfer id (also used to cancel).
     pub job: u64,
-    /// Local source paths (from a Finder drop on the WebView).
-    pub sources: Vec<PathBuf>,
+    /// Sources with their resolved destination name + conflict policy.
+    pub items: Vec<UploadItem>,
     /// Destination folder on the device.
     pub dest_dir: String,
 }
@@ -279,20 +291,16 @@ pub async fn upload_files(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     state.begin_transfer(args.job);
-    let sink = EmitSink::new(app.clone(), args.job, "upload", count_local_files(&args.sources));
+    let sink = EmitSink::new(app.clone(), args.job, "upload", count_local_files(&args.items));
     let dest_dir = TPath::parse(&args.dest_dir);
     let result = state.with_fs(|fs| {
         let xfer = Transfer {
             sink: &sink,
             cancel: &state.transfer.cancel,
         };
-        for src in &args.sources {
-            let name = src
-                .file_name()
-                .and_then(|n| n.to_str())
-                .ok_or_else(|| anyhow::anyhow!("source has no filename: {}", src.display()))?;
-            let dest = dest_dir.join(name);
-            fs.upload_from_tracked(src, &dest, &xfer)?;
+        for item in &args.items {
+            let dest = dest_dir.join(&item.dest_name);
+            fs.upload_from_tracked(&item.source, &dest, item.overwrite, &xfer)?;
         }
         Ok(())
     });
@@ -521,17 +529,24 @@ pub struct MoveArgs {
     pub source: String,
     /// Destination folder (device-relative; "" = storage root).
     pub dest_dir: String,
+    /// Leaf name at the destination. Usually the source's own name; a suffixed
+    /// name is the frontend's "Keep Both" resolution of a clash.
+    pub dest_name: String,
+    /// Replace a same-named object already in `dest_dir` (the dialog's
+    /// "Replace"). `false` refuses a clash rather than overwriting.
+    pub overwrite: bool,
 }
 
-/// Move an object into another folder on the same device. Backs the
-/// drag-onto-breadcrumb gesture: drop a row on an ancestor crumb (or the
-/// device chip = root) to relocate it there. A device-side PTP MoveObject —
-/// see [`Fs::move_to`].
+/// Move an object into another folder on the same device. Backs the drag move
+/// (onto a folder, an ancestor crumb, or the device chip = root) and paste-cut.
+/// A device-side PTP MoveObject — see [`Fs::move_to`].
 #[tauri::command]
 pub async fn move_object(args: MoveArgs, state: State<'_, AppState>) -> Result<(), String> {
     let from = TPath::parse(&args.source);
     let dest_dir = TPath::parse(&args.dest_dir);
-    state.with_fs(|fs| fs.move_to(&from, &dest_dir)).map_err(err)
+    state
+        .with_fs(|fs| fs.move_to(&from, &dest_dir, &args.dest_name, args.overwrite))
+        .map_err(err)
 }
 
 #[derive(Deserialize)]

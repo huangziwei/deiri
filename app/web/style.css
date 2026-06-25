@@ -495,6 +495,84 @@ header {
   padding: 0 4px;
 }
 
+/* Name-conflict dialog — Replace / Keep Both / Skip on a drag-move, upload, or
+   paste-cut into a folder that already holds the name. Same centered-modal idiom
+   as the shortcuts overview; above it (60) so it wins if both ever open. */
+#conflict-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.28);
+}
+#conflict-dialog[hidden] { display: none; }
+#conflict-card {
+  width: 420px;
+  max-width: calc(100vw - 32px);
+  background: #fff;
+  border: 1px solid #c8c8cc;
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+  padding: 16px 18px 14px;
+  font-size: 13px;
+}
+.cf-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.cf-title { font-weight: 600; font-size: 14px; }
+#conflict-close {
+  border: none;
+  background: transparent;
+  color: #888;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+}
+#conflict-close:hover { background: #f0f0f4; color: #333; }
+.cf-message { margin: 2px 0 6px; line-height: 1.4; }
+.cf-message strong { font-weight: 600; word-break: break-all; }
+.cf-hint { margin: 0 0 12px; color: #777; font-size: 12px; line-height: 1.4; }
+.cf-apply {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: #555;
+  cursor: pointer;
+  user-select: none;
+}
+.cf-apply[hidden] { display: none; }
+.cf-actions { display: flex; align-items: center; gap: 8px; }
+.cf-spacer { flex: 1 1 auto; }
+.cf-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  border: 1px solid #c8c8cc;
+  border-radius: 6px;
+  background: #fff;
+  color: #222;
+  cursor: pointer;
+}
+.cf-btn:hover { background: #f3f3f6; }
+.cf-btn.cf-primary {
+  border-color: #2f6bd6;
+  background: #2f6bd6;
+  color: #fff;
+}
+.cf-btn.cf-primary:hover { background: #2a60c2; }
+.cf-btn.cf-primary:focus-visible { outline: 2px solid #9cc0ff; outline-offset: 1px; }
+.cf-btn.cf-danger { color: #c23030; }
+.cf-btn.cf-danger:hover { background: #fbeaea; }
+
 /* Format filter pills — derived from the current folder's file types. Take the
    flexible middle of the header; scroll horizontally if a folder has many. */
 #filter-pills {
@@ -760,6 +838,17 @@ body.col-resizing { cursor: col-resize; }
   .sc-foot { border-top-color: #3a3a40; }
   #shortcuts-card kbd { background: #1e1e20; border-color: #3a3a40; color: #ccc; }
   #shortcuts-card code { background: #1e1e20; border-color: #3a3a40; }
+  #conflict-card { background: #2e2e32; border-color: #44444a; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55); }
+  .cf-title { color: #e8e8ea; }
+  #conflict-close:hover { background: #3a3a40; color: #ddd; }
+  .cf-hint { color: #9a9aa0; }
+  .cf-apply { color: #b0b0b4; }
+  .cf-btn { background: #2c2c30; border-color: #44444a; color: #e0e0e2; }
+  .cf-btn:hover { background: #34343a; }
+  .cf-btn.cf-primary { background: #2f6bd6; border-color: #2f6bd6; color: #fff; }
+  .cf-btn.cf-primary:hover { background: #356fd8; }
+  .cf-btn.cf-danger { color: #ff6b6b; }
+  .cf-btn.cf-danger:hover { background: #3a2626; }
   #device-chip-chevron:hover { background: rgba(255, 255, 255, 0.1); }
   #device-chip { background: #2c2c30; border-color: #44444a; color: inherit; }
   #device-chip:hover { background: #34343a; }

@@ -35,8 +35,19 @@ window.api = {
   // mints `job` so its progress panel and Cancel button work before the first
   // byte moves; the same id cancels it. Progress arrives as `transfer-progress`
   // events. Drag-OUT to Finder uses the OS sheet and isn't routed here.
-  uploadFiles: (job, sources, destDir) =>
-    TAURI.core.invoke("upload_files", { args: { job, sources, dest_dir: destDir } }),
+  // `items` is [{ source, dest_name, overwrite }]: a local path, the leaf name
+  // to write (suffixed for a "Keep Both" resolution), and whether to replace a
+  // same-named object. The frontend resolves clashes before calling, so the
+  // backend never silently overwrites.
+  uploadFiles: (job, items, destDir) =>
+    TAURI.core.invoke("upload_files", { args: { job, items, dest_dir: destDir } }),
+  // Move an object into destDir under destName (suffixed for "Keep Both"),
+  // replacing a same-named object when overwrite is true. Backs drag-move and
+  // paste-cut; clashes are resolved by the conflict dialog before calling.
+  moveObject: (source, destDir, destName, overwrite) =>
+    TAURI.core.invoke("move_object", {
+      args: { source, dest_dir: destDir, dest_name: destName, overwrite },
+    }),
   downloadObjects: (job, sources, destDir, fileCount) =>
     TAURI.core.invoke("download_objects", {
       args: { job, sources, dest_dir: destDir, file_count: fileCount },
