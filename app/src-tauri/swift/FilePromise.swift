@@ -45,7 +45,10 @@ public typealias PositionFn = @convention(c) (
     Int32                    // phase
 ) -> Void
 
-private struct PendingDrag {
+// Decoded from the JSON array `drag_arm` sends over the C ABI — one element per
+// object in the dragged selection. Keys are snake_case to match the Rust
+// `DragItem` serialization.
+private struct PendingDrag: Decodable {
     let objectPath: String
     let suggestedName: String
     let sizeBytes: UInt64
@@ -54,6 +57,13 @@ private struct PendingDrag {
     // `download_to` figures out file-vs-folder on the device side on its own;
     // this flag is only here so `startDrag` can pick the right UTI/icon.
     let isDir: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case objectPath = "object_path"
+        case suggestedName = "suggested_name"
+        case sizeBytes = "size_bytes"
+        case isDir = "is_dir"
+    }
 }
 
 private final class FilePromiseState {
@@ -61,14 +71,17 @@ private final class FilePromiseState {
     var resolver: ResolverFn?
     var position: PositionFn?
     var userCtx: UnsafeRawPointer?
-    var pending: PendingDrag?
+    // The objects armed for the next drag (empty = nothing armed). A drag can
+    // carry a whole multi-selection, so this is a list, consumed when the drag
+    // actually starts.
+    var pending: [PendingDrag] = []
     var monitor: Any?
     var mouseDownEvent: NSEvent?
     // Set when a drag session actually begins, so the source callbacks can
     // convert screen points to this window's web-client coordinates and tell
-    // JS which object is in flight. Cleared in `endedAt`.
+    // JS which objects are in flight. Cleared in `endedAt`.
     var dragWindow: NSWindow?
-    var dragObjectPath: String?
+    var dragObjectPaths: [String] = []
     // Last screen point we reported, to throttle the high-frequency `movedTo`
     // stream so we don't flood the IPC channel with sub-pixel jitter.
     var lastEmit: NSPoint?
@@ -103,7 +116,8 @@ public func filepromise_install(
         case .leftMouseDown:
             s.mouseDownEvent = event
         case .leftMouseDragged:
-            if let pending = s.pending,
+            let pending = s.pending
+            if !pending.isEmpty,
                let window = event.window {
                 // hitTest the actual view at the cursor — that's the WKWebView,
                 // not the bare contentView. Starting the drag from the wrong
@@ -116,14 +130,14 @@ public func filepromise_install(
                 guard let view = hitView ?? window.contentView else { break }
 
                 // Consume so a second drag needs a fresh `arm` from JS.
-                s.pending = nil
+                s.pending = []
                 // Use the dragged event itself, not the stored mouseDown.
                 // AppKit accepts either; the dragged event is fresher and
                 // its locationInWindow is where the drag image should appear.
                 NSLog(
-                    "[filepromise] beginDraggingSession from %@ for %@",
+                    "[filepromise] beginDraggingSession from %@ for %d item(s)",
                     String(describing: type(of: view)),
-                    pending.suggestedName
+                    pending.count
                 )
                 startDrag(view: view, downEvent: event, payload: pending)
             }
@@ -132,7 +146,7 @@ public func filepromise_install(
             // Defensive: pending should only persist while the cursor is over
             // a row. Once the button comes up, any prior arm is moot — JS
             // will re-arm on the next mouseenter.
-            s.pending = nil
+            s.pending = []
         default:
             break
         }
@@ -141,73 +155,85 @@ public func filepromise_install(
 }
 
 @_cdecl("filepromise_arm")
-public func filepromise_arm(
-    objectPath: UnsafePointer<CChar>,
-    suggestedName: UnsafePointer<CChar>,
-    sizeBytes: UInt64,
-    isDir: Bool
-) {
-    FilePromiseState.shared.pending = PendingDrag(
-        objectPath: String(cString: objectPath),
-        suggestedName: String(cString: suggestedName),
-        sizeBytes: sizeBytes,
-        isDir: isDir
-    )
+public func filepromise_arm(itemsJSON: UnsafePointer<CChar>) {
+    let json = String(cString: itemsJSON)
+    guard let data = json.data(using: .utf8) else {
+        NSLog("[filepromise] arm: items JSON was not valid UTF-8")
+        FilePromiseState.shared.pending = []
+        return
+    }
+    do {
+        FilePromiseState.shared.pending =
+            try JSONDecoder().decode([PendingDrag].self, from: data)
+    } catch {
+        NSLog("[filepromise] arm: failed to decode items: %@", String(describing: error))
+        FilePromiseState.shared.pending = []
+    }
 }
 
 @_cdecl("filepromise_cancel")
 public func filepromise_cancel() {
-    FilePromiseState.shared.pending = nil
+    FilePromiseState.shared.pending = []
 }
 
 // MARK: - Drag start
 
-private func startDrag(view: NSView, downEvent: NSEvent, payload: PendingDrag) {
-    let uti: UTType
-    if payload.isDir {
-        // public.folder — Finder makes a directory at the promise URL and our
-        // resolver fills it via the recursive `download_folder`.
-        uti = .folder
-    } else {
-        let ext = (payload.suggestedName as NSString).pathExtension
-        uti = UTType(filenameExtension: ext) ?? UTType.data
+private func startDrag(view: NSView, downEvent: NSEvent, payload: [PendingDrag]) {
+    guard !payload.isEmpty else { return }
+
+    // Remember the window + dragged objects so the source callbacks can map
+    // screen points into this WebView's client coordinates and tell JS a drag
+    // is in flight. Cleared when the session ends.
+    let state = FilePromiseState.shared
+    state.dragWindow = view.window
+    state.dragObjectPaths = payload.map { $0.objectPath }
+    state.lastEmit = nil
+
+    var items: [NSDraggingItem] = []
+    for (index, drag) in payload.enumerated() {
+        let uti: UTType
+        if drag.isDir {
+            // public.folder — Finder makes a directory at the promise URL and
+            // our resolver fills it via the recursive `download_folder`.
+            uti = .folder
+        } else {
+            let ext = (drag.suggestedName as NSString).pathExtension
+            uti = UTType(filenameExtension: ext) ?? UTType.data
+        }
+
+        let delegate = PromiseDelegate(payload: drag)
+        // Strong-retain each delegate until the session ends — see comment in
+        // FilePromiseState. The DragSource.endedAt callback drops them all.
+        state.activeDelegates.append(delegate)
+
+        let provider = NSFilePromiseProvider(
+            fileType: uti.identifier,
+            delegate: delegate
+        )
+        // Stash the device-side path on the provider so the delegate can read
+        // it without holding the closure capture in two places.
+        provider.userInfo = drag.objectPath
+
+        let item = NSDraggingItem(pasteboardWriter: provider)
+        let icon = NSWorkspace.shared.icon(for: uti)
+        // Fan multiple icons out by a few points so a multi-item drag reads as
+        // a stack rather than a single tile.
+        let stack = CGFloat(index) * 4
+        item.setDraggingFrame(
+            NSRect(
+                origin: NSPoint(
+                    x: downEvent.locationInWindow.x - 16 + stack,
+                    y: downEvent.locationInWindow.y - 16 - stack
+                ),
+                size: NSSize(width: 32, height: 32)
+            ),
+            contents: icon
+        )
+        items.append(item)
     }
 
-    // Remember the window + dragged object so the source callbacks can map
-    // screen points into this WebView's client coordinates and tell JS which
-    // object is moving. Cleared when the session ends.
-    FilePromiseState.shared.dragWindow = view.window
-    FilePromiseState.shared.dragObjectPath = payload.objectPath
-    FilePromiseState.shared.lastEmit = nil
-
-    let delegate = PromiseDelegate(payload: payload)
-    // Strong-retain the delegate until the drag session ends — see comment
-    // in FilePromiseState. The DragSource.endedAt callback drops it.
-    FilePromiseState.shared.activeDelegates.append(delegate)
-
-    let provider = NSFilePromiseProvider(
-        fileType: uti.identifier,
-        delegate: delegate
-    )
-    // Stash the device-side path on the provider so the delegate can read it
-    // without holding the closure capture in two places.
-    provider.userInfo = payload.objectPath
-
-    let item = NSDraggingItem(pasteboardWriter: provider)
-    let icon = NSWorkspace.shared.icon(for: uti)
-    item.setDraggingFrame(
-        NSRect(
-            origin: NSPoint(
-                x: downEvent.locationInWindow.x - 16,
-                y: downEvent.locationInWindow.y - 16
-            ),
-            size: NSSize(width: 32, height: 32)
-        ),
-        contents: icon
-    )
-
     view.beginDraggingSession(
-        with: [item],
+        with: items,
         event: downEvent,
         source: DragSource.shared
     )
@@ -240,7 +266,9 @@ private func reportDragPosition(phase: Int32) {
     guard let position = s.position,
           let window = s.dragWindow,
           let content = window.contentView,
-          let path = s.dragObjectPath else { return }
+          // JS owns the dragged set (it armed it); the path here only keeps the
+          // event channel populated and satisfies the no-active-drag guard.
+          let path = s.dragObjectPaths.first else { return }
     let cursor = NSEvent.mouseLocation
     let winPoint = window.convertFromScreen(NSRect(origin: cursor, size: .zero)).origin
     let viewPoint = content.convert(winPoint, from: nil) // window base → content view
@@ -358,12 +386,12 @@ private final class DragSource: NSObject, NSDraggingSource {
         reportDragPosition(phase: 2)
 
         // Drop strong refs to the delegates that backed this session and the
-        // per-drag tracking state. We only run one drag at a time, so clearing
-        // all is safe; multi-item drags would need per-session tracking.
+        // per-drag tracking state. A session may carry several items, but only
+        // one session runs at a time, so clearing all of them here is correct.
         let s = FilePromiseState.shared
         s.activeDelegates.removeAll()
         s.dragWindow = nil
-        s.dragObjectPath = nil
+        s.dragObjectPaths = []
         s.lastEmit = nil
     }
 }

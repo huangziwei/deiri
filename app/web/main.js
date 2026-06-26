@@ -1777,6 +1777,13 @@ document.addEventListener("keydown", (ev) => {
   }
 });
 
+// The objects armed for the next drag-out (device-relative paths). Set on row
+// mouseenter, cleared on mouseleave/cancel. Held until the drop so an in-window
+// move (onDragInternal) knows the whole set — JS owns it because JS decided
+// whether the gesture drags one row or the multi-selection (Swift just fans out
+// one file promise per entry).
+let dragOutItems = [];
+
 function attachDragOut(tr, e) {
   // Native drag-out is initiated by the Swift event monitor on the first
   // mouseDragged after we "arm" the row. HTML5 drag is suppressed so the
@@ -1788,16 +1795,43 @@ function attachDragOut(tr, e) {
   // ~15ms of mousedown, well before pending is set in Swift.
   tr.draggable = false;
   tr.addEventListener("dragstart", (ev) => ev.preventDefault());
-  tr.addEventListener("mouseenter", () => {
-    window.api.invoke("drag_arm", {
-      objectPath: cwd ? `${cwd}/${e.name}` : e.name,
-      suggestedName: e.name,
-      sizeBytes: e.size ?? 0,
-      isDir: e.is_dir,
-    });
-  });
+  tr.addEventListener("mouseenter", () => armDragOut(e));
   tr.addEventListener("mouseleave", () => {
     window.api.invoke("drag_cancel");
+    dragOutItems = [];
+  });
+}
+
+// Arm the drag payload for the row under the cursor. Finder-style: if that row
+// is part of a multi-selection, the whole selection drags; otherwise just the
+// hovered row (its own click will have reduced the selection to it). Each entry
+// becomes one file promise on the Swift side.
+function armDragOut(hovered) {
+  const hoveredPath = pathFor(hovered.name);
+  let dragging;
+  if (selected.size > 1 && selected.has(hoveredPath)) {
+    // Map each selected path back to its entry for name/size/is_dir; infer from
+    // the path if it isn't in the current listing (shouldn't happen — selection
+    // is cleared on navigation — but keeps the drag well-formed regardless).
+    dragging = [...selected].map((p) => {
+      const found = allEntries.find((x) => pathFor(x.name) === p);
+      return found
+        ? { path: p, name: found.name, size: found.size ?? 0, isDir: found.is_dir }
+        : { path: p, name: p.split("/").pop(), size: 0, isDir: p.lastIndexOf(".") <= 0 };
+    });
+  } else {
+    dragging = [
+      { path: hoveredPath, name: hovered.name, size: hovered.size ?? 0, isDir: hovered.is_dir },
+    ];
+  }
+  dragOutItems = dragging.map((it) => it.path);
+  window.api.invoke("drag_arm", {
+    items: dragging.map((it) => ({
+      object_path: it.path,
+      suggested_name: it.name,
+      size_bytes: it.size,
+      is_dir: it.isDir,
+    })),
   });
 }
 
@@ -2477,12 +2511,12 @@ let dragHoverTarget = null; // drop-target element currently highlighted, if any
 
 // The drop target under a client point: the nearest ancestor carrying a
 // destination path (a crumb, the chip, or a folder row/tile). null when the
-// point isn't over one, or when it's the dragged object's own folder — a folder
-// can't be moved into itself.
-function dropTargetAt(x, y, sourcePath) {
+// point isn't over one, or when it's one of the dragged objects' own rows — a
+// folder can't be moved into itself (or into another item being dragged).
+function dropTargetAt(x, y, sourcePaths) {
   const el = document.elementFromPoint(x, y);
   const target = el ? el.closest("[data-droppath]") : null;
-  if (target && target.dataset.droppath === sourcePath) return null;
+  if (target && sourcePaths.includes(target.dataset.droppath)) return null;
   return target;
 }
 
@@ -2493,11 +2527,11 @@ function clearDropHighlight() {
   }
 }
 
-async function commitMove(sourcePath, destDir) {
-  const name = sourcePath.split("/").pop();
+async function commitMoveMany(sourcePaths, destDir) {
+  if (!sourcePaths.length) return;
   // The drop target is usually NOT the folder we're viewing (a sub-folder row,
-  // an ancestor crumb, or the root chip), so fetch its listing to detect a
-  // clash. `cwd` is the rare exception and reuses the in-memory listing.
+  // an ancestor crumb, or the root chip), so fetch its listing once to detect
+  // clashes. `cwd` is the rare exception and reuses the in-memory listing.
   let destNamesLower;
   try {
     const listing =
@@ -2505,27 +2539,31 @@ async function commitMove(sourcePath, destDir) {
     destNamesLower = new Set(listing.map((e) => e.name.toLowerCase()));
   } catch (err) {
     console.error("move: couldn't read destination", destDir, err);
-    alert(`Couldn't move ${name}:\n\n${err}`);
+    alert(`Couldn't move:\n\n${err}`);
     return;
   }
   // is_dir is known when the source is in the current listing; else infer it.
-  const here = allEntries.find((e) => pathFor(e.name) === sourcePath);
-  const isDir = here ? here.is_dir : name.lastIndexOf(".") <= 0;
-  const resolved = await resolveConflicts(
-    [{ source: sourcePath, name, isDir }],
-    destNamesLower,
-    { verb: "move" },
-  );
+  const items = sourcePaths.map((p) => {
+    const name = p.split("/").pop();
+    const here = allEntries.find((e) => pathFor(e.name) === p);
+    const isDir = here ? here.is_dir : name.lastIndexOf(".") <= 0;
+    return { source: p, name, isDir };
+  });
+  const resolved = await resolveConflicts(items, destNamesLower, { verb: "move" });
   if (!resolved || resolved.length === 0) return;
-  const r = resolved[0];
-  try {
-    await window.api.moveObject(r.source, destDir, r.destName, r.overwrite);
-  } catch (err) {
-    console.error("move failed", sourcePath, "→", destDir, err);
-    alert(`Couldn't move ${name}:\n\n${err}`);
-    return;
+  let failures = 0;
+  for (const r of resolved) {
+    try {
+      await window.api.moveObject(r.source, destDir, r.destName, r.overwrite);
+    } catch (err) {
+      failures++;
+      console.error("move failed", r.source, "→", destDir, err);
+    }
   }
-  // The object left `cwd` and landed in `destDir`; cached folder sizes along
+  if (failures) {
+    alert(`Couldn't move ${failures} item${failures > 1 ? "s" : ""}.`);
+  }
+  // The objects left `cwd` and landed in `destDir`; cached folder sizes along
   // both chains are now wrong. Invalidate ancestors of each, then refresh.
   invalidateAncestorsOf(cwd);
   invalidateAncestorsOf(destDir);
@@ -2533,11 +2571,14 @@ async function commitMove(sourcePath, destDir) {
 }
 
 window.api.onDragInternal(({ payload }) => {
-  const { object_path: sourcePath, x, y, phase } = payload;
+  const { x, y, phase } = payload;
+  // The dragged set is whatever JS armed for this gesture (one row or the whole
+  // selection); the event's own path is ignored in favor of that.
+  const sources = dragOutItems;
   if (phase === 1) {
     // Moving: mark the bar droppable and highlight the target under the cursor.
     pathBar.classList.add("drag-active");
-    const target = dropTargetAt(x, y, sourcePath);
+    const target = dropTargetAt(x, y, sources);
     if (target !== dragHoverTarget) {
       clearDropHighlight();
       if (target) {
@@ -2555,15 +2596,16 @@ window.api.onDragInternal(({ payload }) => {
   // a coordinate hit-test only if nothing was highlighted.
   pathBar.classList.remove("drag-active");
   internalDragInProgress = false; // the native drag likely consumed our mouseup
-  const target = dragHoverTarget || dropTargetAt(x, y, sourcePath);
+  const target = dragHoverTarget || dropTargetAt(x, y, sources);
   clearDropHighlight();
-  if (target && openDeviceId) {
+  if (target && openDeviceId && sources.length) {
     const destDir = target.dataset.droppath; // "" = device root
-    // Skip a no-op move into the folder the object already lives in (e.g.
+    // Skip a no-op move into the folder the objects already live in (e.g.
     // dropping on the chip while at root). dropTargetAt already excluded a drop
-    // on the object's own row.
-    if (destDir !== cwd) commitMove(sourcePath, destDir);
+    // on a dragged object's own row.
+    if (destDir !== cwd) commitMoveMany(sources, destDir);
   }
+  dragOutItems = []; // gesture finished; release the armed set
 });
 
 // ---------------------------------------------------------------------------

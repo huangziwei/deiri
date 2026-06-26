@@ -40,18 +40,25 @@ struct DragInternal {
     phase: i32,
 }
 
+/// One object queued for a drag-out by the frontend's `drag_arm`. A single drag
+/// can carry several of these (a multi-selection); they're serialized to one
+/// JSON array and handed to Swift as a single C string, which decodes them into
+/// one NSFilePromiseProvider per item.
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct DragItem {
+    object_path: String,
+    suggested_name: String,
+    size_bytes: u64,
+    is_dir: bool,
+}
+
 unsafe extern "C" {
     fn filepromise_install(
         user_ctx: *const c_void,
         resolver: unsafe extern "C" fn(*const c_char, *const c_char, *const c_void) -> bool,
         position: unsafe extern "C" fn(*const c_char, f64, f64, i32),
     );
-    fn filepromise_arm(
-        object_path: *const c_char,
-        suggested_name: *const c_char,
-        size_bytes: u64,
-        is_dir: bool,
-    );
+    fn filepromise_arm(items_json: *const c_char);
     fn filepromise_cancel();
 }
 
@@ -143,15 +150,16 @@ unsafe extern "C" fn resolver_trampoline(
 }
 
 #[tauri::command]
-pub fn drag_arm(
-    object_path: String,
-    suggested_name: String,
-    size_bytes: u64,
-    is_dir: bool,
-) -> Result<(), String> {
-    let path_c = CString::new(object_path).map_err(|e| e.to_string())?;
-    let name_c = CString::new(suggested_name).map_err(|e| e.to_string())?;
-    unsafe { filepromise_arm(path_c.as_ptr(), name_c.as_ptr(), size_bytes, is_dir) };
+pub fn drag_arm(items: Vec<DragItem>) -> Result<(), String> {
+    // An empty arm means "nothing under the cursor is draggable" — clear any
+    // stale pending so a stray mouseDragged can't start a phantom drag.
+    if items.is_empty() {
+        unsafe { filepromise_cancel() };
+        return Ok(());
+    }
+    let json = serde_json::to_string(&items).map_err(|e| e.to_string())?;
+    let json_c = CString::new(json).map_err(|e| e.to_string())?;
+    unsafe { filepromise_arm(json_c.as_ptr()) };
     Ok(())
 }
 
