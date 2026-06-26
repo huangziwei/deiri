@@ -715,6 +715,18 @@ tbody tr.selected td { background: #d0e3ff; }
 #list-body tr.dragging td { opacity: 0.4; }
 #grid .tile.dragging { opacity: 0.4; }
 
+/* Rubber-band (marquee) selection rectangle. Positioned in #list-container
+   content space (so it scrolls with the rows) and non-interactive so it never
+   intercepts the drag. The translucent system blue reads on light and dark. */
+#marquee {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  border: 1px solid rgba(10, 132, 255, 0.8);
+  background: rgba(10, 132, 255, 0.16);
+  border-radius: 1px;
+}
+
 /* Inline rename field (see beginRename). Fills the name cell/tile so the text
    doesn't jump when the label is swapped for the input. */
 .rename-input {

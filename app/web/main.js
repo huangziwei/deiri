@@ -21,6 +21,7 @@ const listEl = $("list");
 const listBody = $("list-body");
 const gridEl = $("grid");
 const emptyEl = $("empty");
+const marqueeEl = $("marquee");
 const dropzone = $("dropzone-overlay");
 const contextMenu = $("context-menu");
 const navBackBtn = $("nav-back");
@@ -961,6 +962,145 @@ window.addEventListener("blur", () => {
 });
 document.addEventListener("scroll", hideContextMenu, true);
 
+// ---------------------------------------------------------------------------
+// Marquee (rubber-band) selection
+//
+// Mousedown on EMPTY list/grid space starts a rubber band (rows own their
+// mousedown for drag-out, the header for sort). Dragging selects every row/tile
+// the box touches, live; ⇧/⌘ add to the selection that existed when the drag
+// began, otherwise the box IS the selection. A press that never crosses the
+// drag threshold is a plain click on empty space → deselect all (Finder),
+// unless it was dismissing an open menu. Off-screen auto-scroll isn't handled
+// yet — scroll to bring rows into view first.
+
+const MARQUEE_THRESHOLD = 4; // px of travel before a press becomes a marquee
+// True while a marquee gesture is live. Suppresses row drag-out arming: a press
+// that began on empty space is a marquee, so a file row the cursor crosses must
+// NOT arm a drag-out — otherwise Swift hijacks this mouse-drag into a native
+// single-file drag and the marquee is lost.
+let marqueeActive = false;
+
+// Client point → content space (relative to the container's padding box plus its
+// scroll offset), so the band stays anchored to the rows when the list scrolls.
+function marqueePoint(ev) {
+  const r = listContainer.getBoundingClientRect();
+  return {
+    x: ev.clientX - r.left + listContainer.scrollLeft,
+    y: ev.clientY - r.top + listContainer.scrollTop,
+  };
+}
+
+listContainer.addEventListener("mousedown", (ev) => {
+  // Empty space only, primary button, real listing (Everywhere result rows
+  // aren't cwd-relative, so selection geometry wouldn't map).
+  if (ev.button !== 0 || !openDeviceId || searchResultMode) return;
+  if (ev.target.closest("tr, .tile")) return;
+
+  // This drag is a marquee, never a drag-out: block row arming for its duration
+  // and clear any pending arm a prior hover left, so Swift can't start a native
+  // drag mid-marquee.
+  marqueeActive = true;
+  window.api.invoke("drag_cancel");
+
+  const startClientX = ev.clientX;
+  const startClientY = ev.clientY;
+  const start = marqueePoint(ev);
+  const additive = ev.shiftKey || ev.metaKey || ev.ctrlKey;
+  const base = additive ? new Set(selected) : new Set();
+  const menuWasOpen = !contextMenu.hidden || !deviceMenu.hidden;
+  let moved = false;
+  let boxes = null; // content-space rects of the rendered rows, built once
+  let lastEv = ev;
+  let raf = 0;
+
+  function buildBoxes() {
+    const cr = listContainer.getBoundingClientRect();
+    const nodes = viewMode === "list"
+      ? listBody.querySelectorAll("tr")
+      : gridEl.querySelectorAll(".tile");
+    boxes = [];
+    nodes.forEach((n) => {
+      const r = n.getBoundingClientRect();
+      const top = r.top - cr.top + listContainer.scrollTop;
+      const left = r.left - cr.left + listContainer.scrollLeft;
+      boxes.push({
+        path: pathFor(n.dataset.name),
+        top,
+        bottom: top + r.height,
+        left,
+        right: left + r.width,
+      });
+    });
+  }
+
+  function apply() {
+    raf = 0;
+    const cur = marqueePoint(lastEv);
+    const x1 = Math.min(start.x, cur.x);
+    const x2 = Math.max(start.x, cur.x);
+    const y1 = Math.min(start.y, cur.y);
+    const y2 = Math.max(start.y, cur.y);
+    marqueeEl.style.left = `${x1}px`;
+    marqueeEl.style.top = `${y1}px`;
+    marqueeEl.style.width = `${x2 - x1}px`;
+    marqueeEl.style.height = `${y2 - y1}px`;
+    // The selection is the base (prior, if additive) plus everything the band
+    // currently intersects — recomputed each frame so shrinking the box deselects.
+    selected.clear();
+    base.forEach((p) => selected.add(p));
+    for (const b of boxes) {
+      if (b.right >= x1 && b.left <= x2 && b.bottom >= y1 && b.top <= y2) {
+        selected.add(b.path);
+      }
+    }
+    updateSelectionDOM();
+  }
+
+  function onMove(e) {
+    lastEv = e;
+    if (!moved) {
+      if (
+        Math.abs(e.clientX - startClientX) < MARQUEE_THRESHOLD
+        && Math.abs(e.clientY - startClientY) < MARQUEE_THRESHOLD
+      ) return;
+      moved = true;
+      buildBoxes();
+      marqueeEl.hidden = false;
+    }
+    if (!raf) raf = requestAnimationFrame(apply);
+  }
+
+  function onUp() {
+    marqueeActive = false;
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+    if (raf) cancelAnimationFrame(raf);
+    if (moved) {
+      apply(); // settle on the release point even if the last frame was dropped
+      marqueeEl.hidden = true;
+      // Leave a usable keyboard lead at the selection's extent in render order.
+      const idxs = [];
+      entries.forEach((en, i) => {
+        if (selected.has(pathFor(en.name))) idxs.push(i);
+      });
+      if (idxs.length) {
+        anchorIndex = idxs[0];
+        cursorIndex = idxs[idxs.length - 1];
+      }
+    } else if (!additive && !menuWasOpen) {
+      // Plain click on empty space clears the selection (but a click that just
+      // dismissed a menu leaves it alone).
+      selected.clear();
+      anchorIndex = -1;
+      cursorIndex = -1;
+      updateSelectionDOM();
+    }
+  }
+
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+});
+
 // Suppress the WebView's built-in context menu (its "Reload" reloads only the
 // JS, not the Rust session, which then can't re-open the still-held device).
 // Our own file/row menus are shown explicitly by their handlers, so this only
@@ -1806,10 +1946,12 @@ function attachDragOut(tr, e) {
   tr.draggable = false;
   tr.addEventListener("dragstart", (ev) => ev.preventDefault());
   tr.addEventListener("mouseenter", () => {
-    if (!dragArmLocked) armDragOut(e);
+    // Don't arm while a marquee is dragging over this row (it would hijack the
+    // marquee into a native drag), nor while another row's press is locked.
+    if (!dragArmLocked && !marqueeActive) armDragOut(e);
   });
   tr.addEventListener("mouseleave", () => {
-    if (dragArmLocked) return; // mid-press: keep the pressed row's set armed
+    if (dragArmLocked || marqueeActive) return; // mid-press / marquee: leave arm as-is
     window.api.invoke("drag_cancel");
     dragOutItems = [];
   });
@@ -2049,6 +2191,10 @@ document.addEventListener("mouseup", () => {
 window.addEventListener("blur", () => {
   internalDragInProgress = false;
   dragArmLocked = false;
+  // If focus is lost mid-marquee the mouseup may never reach onUp; clear the
+  // flag and hide the band so drag-out arming isn't left blocked.
+  marqueeActive = false;
+  marqueeEl.hidden = true;
 });
 
 // ---------------------------------------------------------------------------
