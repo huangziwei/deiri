@@ -1783,23 +1783,57 @@ document.addEventListener("keydown", (ev) => {
 // whether the gesture drags one row or the multi-selection (Swift just fans out
 // one file promise per entry).
 let dragOutItems = [];
+// While a row is pressed (mousedown until release/drag-end), the armed set is
+// FROZEN: hover changes must not re-arm it. Without this, the cursor crossing
+// neighbouring rows on the way into the drag re-armed Swift's `pending` to a row
+// merely passed over, so the wrong file dragged out. Set on mousedown, cleared
+// on mouseup and on drag end.
+let dragArmLocked = false;
+// Whether the dragged rows are currently dimmed (the in-flight indicator).
+let draggingMarked = false;
 
 function attachDragOut(tr, e) {
   // Native drag-out is initiated by the Swift event monitor on the first
   // mouseDragged after we "arm" the row. HTML5 drag is suppressed so the
   // WebView doesn't start its own drag session that competes with ours.
   //
-  // Arming happens on `mouseenter` (not `mousedown`) so the Tauri IPC
-  // roundtrip — ~50-100ms — completes BEFORE the user starts moving. With
-  // `mousedown` arming, the user's first mouseDragged often fires within
-  // ~15ms of mousedown, well before pending is set in Swift.
+  // Pre-arming on `mouseenter` lets the Tauri IPC roundtrip (~50-100ms) finish
+  // BEFORE the user starts moving. But the hovered row keeps changing as the
+  // cursor travels into the drag, so we LOCK the armed set on mousedown (the row
+  // actually pressed) and ignore hover re-arming until release — otherwise the
+  // file that crossed under the cursor would be dragged instead of the pressed
+  // one.
   tr.draggable = false;
   tr.addEventListener("dragstart", (ev) => ev.preventDefault());
-  tr.addEventListener("mouseenter", () => armDragOut(e));
+  tr.addEventListener("mouseenter", () => {
+    if (!dragArmLocked) armDragOut(e);
+  });
   tr.addEventListener("mouseleave", () => {
+    if (dragArmLocked) return; // mid-press: keep the pressed row's set armed
     window.api.invoke("drag_cancel");
     dragOutItems = [];
   });
+  tr.addEventListener("mousedown", () => {
+    // Freeze the payload to the pressed row (or the selection it belongs to).
+    // Re-arm here too so a press without a prior mouseenter is still armed.
+    armDragOut(e);
+    dragArmLocked = true;
+  });
+}
+
+// Dim the rows/tiles currently being dragged out (Finder-style), so it's clear
+// which file(s) are in flight. `clear` removes it from whatever still carries it.
+function markDraggingRows() {
+  const nodes = viewMode === "list"
+    ? listBody.querySelectorAll("tr")
+    : gridEl.querySelectorAll(".tile");
+  nodes.forEach((n) =>
+    n.classList.toggle("dragging", dragOutItems.includes(pathFor(n.dataset.name))),
+  );
+}
+
+function clearDraggingRows() {
+  document.querySelectorAll(".dragging").forEach((n) => n.classList.remove("dragging"));
 }
 
 // Arm the drag payload for the row under the cursor. Finder-style: if that row
@@ -2004,8 +2038,18 @@ function updateStatusBar() {
 // empty space — pops the import overlay.
 let internalDragInProgress = false;
 document.addEventListener("mousedown", () => { internalDragInProgress = true; });
-document.addEventListener("mouseup", () => { internalDragInProgress = false; });
-window.addEventListener("blur", () => { internalDragInProgress = false; });
+document.addEventListener("mouseup", () => {
+  internalDragInProgress = false;
+  // A press that ended without a native drag (a plain click) won't get a
+  // drag-end event, so release the arm lock here too. After a real drag the
+  // native session usually swallows this mouseup; onDragInternal's drag-end
+  // clears the lock in that case.
+  dragArmLocked = false;
+});
+window.addEventListener("blur", () => {
+  internalDragInProgress = false;
+  dragArmLocked = false;
+});
 
 // ---------------------------------------------------------------------------
 // Transfers (upload in / download out): progress bar + cancel.
@@ -2599,6 +2643,12 @@ window.api.onDragInternal(({ payload }) => {
   if (phase === 1) {
     // Moving: mark the bar droppable and highlight the target under the cursor.
     pathBar.classList.add("drag-active");
+    // First move of the gesture: dim the dragged rows so it's clear what's in
+    // flight. Done here (not at mousedown) so a plain click never dims.
+    if (!draggingMarked) {
+      markDraggingRows();
+      draggingMarked = true;
+    }
     const target = dropTargetAt(x, y, sources);
     if (target !== dragHoverTarget) {
       clearDropHighlight();
@@ -2627,6 +2677,9 @@ window.api.onDragInternal(({ payload }) => {
     if (destDir !== cwd) commitMoveMany(sources, destDir);
   }
   dragOutItems = []; // gesture finished; release the armed set
+  clearDraggingRows();
+  draggingMarked = false;
+  dragArmLocked = false; // press is over; hover may re-arm again
 });
 
 // ---------------------------------------------------------------------------

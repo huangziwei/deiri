@@ -709,6 +709,12 @@ tbody tr.selected td { background: #d0e3ff; }
 #list-body tr.cut td { opacity: 0.45; }
 #grid .tile.cut { opacity: 0.45; }
 
+/* In-flight drag indicator: the row(s) actually being dragged out dim while the
+   drag is live (Finder-style), so it's unambiguous which file is moving. Cleared
+   when the drag ends. */
+#list-body tr.dragging td { opacity: 0.4; }
+#grid .tile.dragging { opacity: 0.4; }
+
 /* Inline rename field (see beginRename). Fills the name cell/tile so the text
    doesn't jump when the label is swapped for the input. */
 .rename-input {
