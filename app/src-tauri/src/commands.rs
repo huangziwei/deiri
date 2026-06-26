@@ -637,3 +637,13 @@ pub async fn confirm_dialog(app: AppHandle, args: ConfirmArgs) -> Result<bool, S
     });
     rx.await.map_err(|e| e.to_string())
 }
+
+/// Close the calling window — backs the ⌘W shortcut. On macOS the window-close
+/// handler in `lib.rs` intercepts the resulting `CloseRequested` and hides the
+/// window instead, so the app keeps running in the dock; on other platforms the
+/// window closes normally. Wrapped as a command so the frontend doesn't depend
+/// on the JS window plugin (same rationale as `pick_folder`).
+#[tauri::command]
+pub fn close_window(window: tauri::Window) -> Result<(), String> {
+    window.close().map_err(|e| e.to_string())
+}

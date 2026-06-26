@@ -1801,6 +1801,15 @@ document.addEventListener("keydown", (ev) => {
     return;
   }
 
+  // ⌘W closes the window — but the app keeps running in the dock (the Rust
+  // CloseRequested handler hides instead of quitting; ⌘Q quits). Handle it
+  // before the input guard so it works while a text field is focused too.
+  if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "w") {
+    ev.preventDefault();
+    window.api.closeWindow();
+    return;
+  }
+
   // Don't hijack keys while typing in an input (the search box, inline rename,
   // the device-name field) — let arrows, Enter, etc. do their text thing there.
   const tag = ev.target?.tagName;

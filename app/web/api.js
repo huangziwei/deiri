@@ -10,6 +10,12 @@ if (!TAURI) {
 window.api = {
   invoke: (cmd, args) => TAURI.core.invoke(cmd, args),
 
+  // Close the current window (⌘W) via a Rust wrapper (kept off the JS window
+  // plugin for the same churn reason as pickFolder below). On macOS the
+  // CloseRequested handler in lib.rs turns the close into a hide — the app stays
+  // in the dock and reopens on a dock-icon click; ⌘Q is what quits.
+  closeWindow: () => TAURI.core.invoke("close_window"),
+
   // Open a device file with the system default app. Pulls it to a per-session
   // temp copy (cached by object handle) and hands it to the OS opener.
   // Read-only preview — external edits aren't synced back.
