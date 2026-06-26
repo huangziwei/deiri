@@ -2013,8 +2013,9 @@ window.addEventListener("blur", () => { internalDragInProgress = false; });
 // One job at a time — the device serializes anyway. The frontend mints the job
 // id and shows the bar synchronously, so Cancel works even before the first
 // byte. The backend streams throttled `transfer-progress` events; the command's
-// promise resolving (or rejecting) ends the job. Drag-OUT to Finder keeps its
-// native OS copy sheet and never reaches here.
+// promise resolving (or rejecting) ends the job. Drag-OUT to Finder is native
+// (no command), so the backend drives the bar instead — `transfer-begin` /
+// `transfer-end` events show and hide it (see onTransferBegin below).
 
 const transferBar = $("transfer-bar");
 const transferLabel = $("transfer-label");
@@ -2073,6 +2074,26 @@ transferCancelBtn.addEventListener("click", () => {
   transferLabel.textContent = "Cancelling…";
   transferCancelBtn.disabled = true;
   window.api.cancelTransfer(activeTransfer.job).catch((e) => console.error("cancel failed", e));
+});
+
+// Native drag-out has no frontend command to mint a job or show the bar, so the
+// backend signals the bar's lifecycle: adopt the job it hands over and show the
+// bar; the shared `transfer-progress` handler above then drives it. Ignore a
+// begin while another transfer already owns the bar (the rare case of a drag-out
+// starting atop a still-running background transfer) — the download still runs,
+// just without its own bar.
+window.api.onTransferBegin(({ payload }) => {
+  if (activeTransfer) return;
+  activeTransfer = { job: payload.job, direction: payload.direction, cancelling: false };
+  transferLabel.textContent = "Downloading…";
+  transferCount.textContent = "";
+  transferFill.style.width = "0%";
+  transferCancelBtn.disabled = false;
+  transferBar.hidden = false;
+});
+
+window.api.onTransferEnd(({ payload }) => {
+  if (activeTransfer && activeTransfer.job === payload.job) endTransfer();
 });
 
 window.api.onDragDrop(async (event) => {

@@ -44,7 +44,7 @@ static NEVER_CANCEL: AtomicBool = AtomicBool::new(false);
 
 impl Transfer<'static> {
     /// A transfer that reports nothing and never cancels — for callers that
-    /// don't surface progress (the drag-out promise, open/Quick Look previews).
+    /// don't surface progress (open / Quick Look previews).
     pub fn noop() -> Transfer<'static> {
         Transfer {
             sink: &NOOP_SINK,

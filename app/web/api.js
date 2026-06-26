@@ -62,6 +62,12 @@ window.api = {
     TAURI.core.invoke("copy_objects", { args: { job, items, dest_dir: destDir } }),
   cancelTransfer: (job) => TAURI.core.invoke("cancel_transfer", { job }),
   onTransferProgress: (handler) => TAURI.event.listen("transfer-progress", handler),
+  // Backend-driven bar lifecycle for native drag-out (no frontend command mints
+  // its job): `transfer-begin` shows the bar and hands over the job to adopt,
+  // `transfer-end` hides it. Frontend-initiated transfers don't use these — they
+  // call startTransfer/endTransfer directly. Both return a Promise of unlisten.
+  onTransferBegin: (handler) => TAURI.event.listen("transfer-begin", handler),
+  onTransferEnd: (handler) => TAURI.event.listen("transfer-end", handler),
 
   // Everywhere search: walk the subtree under `root`, streaming every object as
   // `search-batch` events for the frontend to match against the query. Shares

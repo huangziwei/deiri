@@ -14,12 +14,14 @@
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
-use mtp_core::Fs;
+use mtp_core::{Fs, TPath, Transfer};
 use serde::Serialize;
-use tauri::{App, Emitter, Manager};
+use tauri::{App, AppHandle, Emitter, Manager};
 
+use crate::commands::EmitSink;
 use crate::state::AppState;
 
 static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
@@ -50,6 +52,89 @@ pub struct DragItem {
     suggested_name: String,
     size_bytes: u64,
     is_dir: bool,
+}
+
+/// Bar-lifecycle events for a drag-out download. Drag-out is native and has no
+/// frontend command to mint a job or hide the bar on completion, so the backend
+/// drives both: `transfer-begin` shows the bar (the frontend adopts `job`),
+/// `transfer-progress` (streamed by the shared [`EmitSink`]) updates it, and
+/// `transfer-end` hides it. Mirrors the `download_objects` "Save to…" path.
+#[derive(Clone, Serialize)]
+struct TransferBegin {
+    job: u64,
+    direction: &'static str,
+}
+
+#[derive(Clone, Serialize)]
+struct TransferEnd {
+    job: u64,
+}
+
+/// The in-flight drag-out download. AppKit resolves one file promise per dragged
+/// object, each on its own thread; they share one job + sink so the bar shows a
+/// single running transfer (with a continuous "N files" count) instead of
+/// flickering once per file. `active` counts the resolvers still running; the
+/// last to finish tears the session down.
+struct DragOutSession {
+    job: u64,
+    active: u32,
+    sink: Arc<EmitSink>,
+}
+
+static DRAG_OUT: Mutex<Option<DragOutSession>> = Mutex::new(None);
+/// Drag-out job ids live in a high range so a progress event that outlives its
+/// gesture can never be mistaken for a frontend-minted transfer (those count up
+/// from 1).
+static DRAG_OUT_SEQ: AtomicU64 = AtomicU64::new(1 << 32);
+
+/// Join the active drag-out session, or open one if this is the gesture's first
+/// promise. Returns the shared job id and progress sink. The opener shows the
+/// transfer bar and — only if no other transfer holds the slot — registers the
+/// job for cancellation (so it never clobbers a background upload's cancel).
+fn dragout_begin(handle: &AppHandle, state: &AppState) -> (u64, Arc<EmitSink>) {
+    let mut guard = DRAG_OUT.lock().expect("drag-out lock poisoned");
+    if let Some(session) = guard.as_mut() {
+        session.active += 1;
+        return (session.job, session.sink.clone());
+    }
+    let job = DRAG_OUT_SEQ.fetch_add(1, Ordering::Relaxed);
+    let sink = Arc::new(EmitSink::new(handle.clone(), job, "download", 0));
+    state.try_begin_transfer(job);
+    let _ = handle.emit("transfer-begin", TransferBegin { job, direction: "download" });
+    *guard = Some(DragOutSession { job, active: 1, sink: sink.clone() });
+    (job, sink)
+}
+
+/// Release one resolver's hold on the drag-out session. When the last resolver
+/// finishes, end the cancel registration and hide the transfer bar.
+fn dragout_end(handle: &AppHandle, state: &AppState, job: u64) {
+    let mut guard = DRAG_OUT.lock().expect("drag-out lock poisoned");
+    let done = match guard.as_mut() {
+        Some(session) if session.job == job => {
+            session.active = session.active.saturating_sub(1);
+            session.active == 0
+        }
+        _ => false,
+    };
+    if done {
+        *guard = None;
+        state.end_transfer(job);
+        let _ = handle.emit("transfer-end", TransferEnd { job });
+    }
+}
+
+/// Runs [`dragout_end`] on scope exit even if the download panics, so a failed
+/// promise can't leave the transfer bar stuck on screen.
+struct DragOutGuard<'a> {
+    handle: &'a AppHandle,
+    state: &'a AppState,
+    job: u64,
+}
+
+impl Drop for DragOutGuard<'_> {
+    fn drop(&mut self) {
+        dragout_end(self.handle, self.state, self.job);
+    }
 }
 
 unsafe extern "C" {
@@ -133,7 +218,19 @@ unsafe extern "C" fn resolver_trampoline(
             .get()
             .ok_or_else(|| anyhow::anyhow!("AppHandle not initialized"))?;
         let state: tauri::State<AppState> = handle.state();
-        state.with_fs(|fs| fs.download_to(&mtp_core::TPath::parse(&object_path), &dest_path))
+        let app_state: &AppState = &state;
+        // Reuse the standard transfer machinery so drag-out shows the same
+        // progress bar as "Save to…": one shared job/sink for the whole gesture,
+        // byte progress streamed as `transfer-progress`, cancel via the bar.
+        let (job, sink) = dragout_begin(handle, app_state);
+        let _guard = DragOutGuard { handle, state: app_state, job };
+        app_state.with_fs(|fs| {
+            let xfer = Transfer {
+                sink: &*sink,
+                cancel: &app_state.transfer.cancel,
+            };
+            fs.download_to_tracked(&TPath::parse(&object_path), &dest_path, &xfer)
+        })
     });
 
     match worker.join() {

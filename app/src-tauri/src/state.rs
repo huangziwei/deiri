@@ -75,6 +75,23 @@ impl AppState {
         self.transfer.cancel.store(false, Ordering::Relaxed);
     }
 
+    /// Claim the transfer slot for `job` only if none is currently running,
+    /// clearing any prior cancel request on success. Returns whether the slot
+    /// was claimed. Used by the drag-out download, which AppKit can start while
+    /// a background transfer still holds the slot — it must not clobber that
+    /// job's cancel registration.
+    pub fn try_begin_transfer(&self, job: u64) -> bool {
+        let claimed = self
+            .transfer
+            .current_job
+            .compare_exchange(0, job, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok();
+        if claimed {
+            self.transfer.cancel.store(false, Ordering::Relaxed);
+        }
+        claimed
+    }
+
     /// Stop tracking `job` once it finishes, so a late cancel becomes a no-op.
     pub fn end_transfer(&self, job: u64) {
         let _ = self.transfer.current_job.compare_exchange(

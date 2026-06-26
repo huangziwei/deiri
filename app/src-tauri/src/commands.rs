@@ -117,7 +117,8 @@ pub async fn storage_info(state: State<'_, AppState>) -> Result<Option<StorageIn
 // the loop polls `AppState.transfer.cancel` between chunks (see mtp-core's
 // `Transfer`). The frontend mints the job id and passes it in, so its panel can
 // appear and its Cancel button can work before the first byte moves. Drag-OUT
-// to Finder keeps the OS's native copy sheet and doesn't come through here.
+// to Finder is native (no command), but reuses `EmitSink` from file_promise.rs
+// to drive the same bar — see `dragout_begin` there.
 
 /// One progress update for an in-flight transfer, emitted as `transfer-progress`.
 #[derive(Clone, Serialize)]
@@ -138,8 +139,9 @@ struct TransferProgress {
 }
 
 /// A [`ProgressSink`] that emits throttled Tauri events. Shared (`&self`) so one
-/// instance threads through a whole multi-file/recursive transfer.
-struct EmitSink {
+/// instance threads through a whole multi-file/recursive transfer. `pub(crate)`
+/// so the drag-out resolver (file_promise.rs) can stream progress the same way.
+pub(crate) struct EmitSink {
     app: AppHandle,
     job: u64,
     direction: &'static str,
@@ -160,7 +162,7 @@ struct SinkInner {
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(80);
 
 impl EmitSink {
-    fn new(app: AppHandle, job: u64, direction: &'static str, file_count: u32) -> Self {
+    pub(crate) fn new(app: AppHandle, job: u64, direction: &'static str, file_count: u32) -> Self {
         Self {
             app,
             job,
