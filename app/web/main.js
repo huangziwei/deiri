@@ -362,10 +362,12 @@ deviceRenameInput.addEventListener("keydown", (ev) => {
 });
 deviceRenameInput.addEventListener("blur", commitRename);
 
-// Open `d` and show its root. `auto` marks an open the user didn't ask for
-// (startup, hot-plug, replug recovery): those retry while the device settles and
-// fail quietly, since a modal about something you didn't click is just noise —
-// the chip stays on "No device" and clicking it retries.
+// Open `d` and show its top level (or the folder we were in, if this is the
+// device we just lost). `auto` marks an open the user didn't click for (startup,
+// hot-plug, replug recovery): those retry while the device settles and fail
+// quietly, since a modal about something you didn't click is just noise. The
+// chip stays on "No device"; picking the device from its menu retries loudly and
+// surfaces the reason (e.g. another app holding the device).
 async function openDevice(d, { auto = false } = {}) {
   const tries = auto ? AUTO_OPEN_TRIES : 1;
   for (let attempt = 1; ; attempt++) {
