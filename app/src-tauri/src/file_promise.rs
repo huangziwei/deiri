@@ -100,8 +100,18 @@ fn dragout_begin(handle: &AppHandle, state: &AppState) -> (u64, Arc<EmitSink>) {
     let job = DRAG_OUT_SEQ.fetch_add(1, Ordering::Relaxed);
     let sink = Arc::new(EmitSink::new(handle.clone(), job, "download", 0));
     state.try_begin_transfer(job);
-    let _ = handle.emit("transfer-begin", TransferBegin { job, direction: "download" });
-    *guard = Some(DragOutSession { job, active: 1, sink: sink.clone() });
+    let _ = handle.emit(
+        "transfer-begin",
+        TransferBegin {
+            job,
+            direction: "download",
+        },
+    );
+    *guard = Some(DragOutSession {
+        job,
+        active: 1,
+        sink: sink.clone(),
+    });
     (job, sink)
 }
 
@@ -176,7 +186,15 @@ unsafe extern "C" fn position_trampoline(object_path: *const c_char, x: f64, y: 
         }
     };
     if let Some(handle) = APP_HANDLE.get() {
-        if let Err(e) = handle.emit("drag-internal", DragInternal { object_path, x, y, phase }) {
+        if let Err(e) = handle.emit(
+            "drag-internal",
+            DragInternal {
+                object_path,
+                x,
+                y,
+                phase,
+            },
+        ) {
             tracing::error!(?e, "drag-internal: emit failed");
         }
     }
@@ -223,7 +241,11 @@ unsafe extern "C" fn resolver_trampoline(
         // progress bar as "Save to…": one shared job/sink for the whole gesture,
         // byte progress streamed as `transfer-progress`, cancel via the bar.
         let (job, sink) = dragout_begin(handle, app_state);
-        let _guard = DragOutGuard { handle, state: app_state, job };
+        let _guard = DragOutGuard {
+            handle,
+            state: app_state,
+            job,
+        };
         app_state.with_fs(|fs| {
             let xfer = Transfer {
                 sink: &*sink,

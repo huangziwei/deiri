@@ -84,7 +84,9 @@ pub async fn close_device(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn list_dir(path: String, state: State<'_, AppState>) -> Result<Vec<Entry>, String> {
-    state.with_fs(|fs| fs.list(&TPath::parse(&path))).map_err(err)
+    state
+        .with_fs(|fs| fs.list(&TPath::parse(&path)))
+        .map_err(err)
 }
 
 #[derive(Deserialize)]
@@ -97,8 +99,13 @@ pub struct DirSizeArgs {
 /// per-folder totals so the UI can cache them all. Potentially slow — one
 /// round-trip per object — and serialized behind the session's op lock.
 #[tauri::command]
-pub async fn dir_sizes(args: DirSizeArgs, state: State<'_, AppState>) -> Result<Vec<FolderSize>, String> {
-    state.with_fs(|fs| fs.dir_sizes_by_id(args.object_id)).map_err(err)
+pub async fn dir_sizes(
+    args: DirSizeArgs,
+    state: State<'_, AppState>,
+) -> Result<Vec<FolderSize>, String> {
+    state
+        .with_fs(|fs| fs.dir_sizes_by_id(args.object_id))
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -293,7 +300,12 @@ pub async fn upload_files(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     state.begin_transfer(args.job);
-    let sink = EmitSink::new(app.clone(), args.job, "upload", count_local_files(&args.items));
+    let sink = EmitSink::new(
+        app.clone(),
+        args.job,
+        "upload",
+        count_local_files(&args.items),
+    );
     let dest_dir = TPath::parse(&args.dest_dir);
     let result = state.with_fs(|fs| {
         let xfer = Transfer {
@@ -337,7 +349,9 @@ pub async fn download_objects(
         };
         for src in &args.sources {
             let tp = TPath::parse(src);
-            let name = tp.name().ok_or_else(|| anyhow::anyhow!("empty source path"))?;
+            let name = tp
+                .name()
+                .ok_or_else(|| anyhow::anyhow!("empty source path"))?;
             let dest = dest_root.join(name);
             fs.download_to_tracked(&tp, &dest, &xfer)?;
         }
@@ -468,7 +482,9 @@ pub struct DownloadArgs {
 #[tauri::command]
 pub async fn download_to(args: DownloadArgs, state: State<'_, AppState>) -> Result<(), String> {
     let src = TPath::parse(&args.source);
-    state.with_fs(|fs| fs.download_to(&src, &args.dest)).map_err(err)
+    state
+        .with_fs(|fs| fs.download_to(&src, &args.dest))
+        .map_err(err)
 }
 
 #[derive(Deserialize)]

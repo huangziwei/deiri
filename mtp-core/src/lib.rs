@@ -13,9 +13,9 @@ pub mod serde_u64_str;
 mod transfer;
 mod walk;
 
-pub use device::{DeviceDescriptor, enumerate, list_devices};
+pub use device::{enumerate, list_devices, DeviceDescriptor};
 pub use fs::{Entry, FolderSize, Fs, StorageInfo};
-pub use mtp::{Liveness, MtpFs, liveness};
+pub use mtp::{liveness, Liveness, MtpFs};
 pub use path::TPath;
 pub use transfer::{ProgressSink, Transfer};
 pub use walk::{WalkEntry, WalkSink};

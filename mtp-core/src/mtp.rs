@@ -19,10 +19,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
-use futures::StreamExt;
 use futures::executor::block_on;
+use futures::StreamExt;
 use mtp_rs::mtp::{MtpDevice, NewObjectInfo, Storage};
 use mtp_rs::ptp::{
     unpack_string, DateTime, ObjectHandle, ObjectInfo, ObjectPropertyCode, OperationCode,
@@ -126,11 +126,7 @@ impl MtpFs {
     async fn resolve(&self, path: &TPath) -> Result<Option<ObjectHandle>> {
         let mut parent: Option<ObjectHandle> = None;
         for segment in path.segments() {
-            let entries = self
-                .storage
-                .list_objects(parent)
-                .await
-                .map_err(map_err)?;
+            let entries = self.storage.list_objects(parent).await.map_err(map_err)?;
             match entries.into_iter().find(|o| &o.filename == segment) {
                 Some(obj) => parent = Some(obj.handle),
                 None => return Ok(None),
@@ -142,11 +138,7 @@ impl MtpFs {
     async fn ensure_folder(&self, path: &TPath) -> Result<Option<ObjectHandle>> {
         let mut parent: Option<ObjectHandle> = None;
         for segment in path.segments() {
-            let entries = self
-                .storage
-                .list_objects(parent)
-                .await
-                .map_err(map_err)?;
+            let entries = self.storage.list_objects(parent).await.map_err(map_err)?;
             let matched = entries.into_iter().find(|o| &o.filename == segment);
             parent = match matched {
                 Some(obj) if obj.is_folder() => Some(obj.handle),
@@ -175,11 +167,7 @@ impl MtpFs {
         let segments = path.segments();
         let mut parent: Option<ObjectHandle> = None;
         for (i, segment) in segments.iter().enumerate() {
-            let entries = self
-                .storage
-                .list_objects(parent)
-                .await
-                .map_err(map_err)?;
+            let entries = self.storage.list_objects(parent).await.map_err(map_err)?;
             match entries.into_iter().find(|o| &o.filename == segment) {
                 Some(obj) if i + 1 == segments.len() => return Ok(Some(obj)),
                 Some(obj) => parent = Some(obj.handle),
@@ -203,7 +191,11 @@ impl MtpFs {
         o: &ObjectInfo,
         probe_dates: &mut bool,
     ) -> Option<i64> {
-        let mut t = o.modified.as_ref().or(o.created.as_ref()).map(datetime_to_unix);
+        let mut t = o
+            .modified
+            .as_ref()
+            .or(o.created.as_ref())
+            .map(datetime_to_unix);
         if t.is_none() && *probe_dates && o.is_file() {
             match fetch_object_date(session, o.handle).await {
                 Some(ts) => t = Some(ts),
@@ -219,7 +211,12 @@ impl MtpFs {
     /// subfolders are preserved. Iterative (explicit stack) so deep trees can't
     /// blow the stack, and so we hold the one `op_lock` for the whole walk like
     /// [`delete_dir`](Self::delete_dir) does.
-    async fn download_folder(&self, root: ObjectHandle, dest: &Path, xfer: &Transfer<'_>) -> Result<()> {
+    async fn download_folder(
+        &self,
+        root: ObjectHandle,
+        dest: &Path,
+        xfer: &Transfer<'_>,
+    ) -> Result<()> {
         std::fs::create_dir_all(dest)
             .with_context(|| format!("create local dir {}", dest.display()))?;
         let mut stack: Vec<(ObjectHandle, PathBuf)> = vec![(root, dest.to_path_buf())];
@@ -256,7 +253,11 @@ impl MtpFs {
         name: &str,
         xfer: &Transfer<'_>,
     ) -> Result<()> {
-        let mut dl = self.storage.download_stream(handle).await.map_err(map_err)?;
+        let mut dl = self
+            .storage
+            .download_stream(handle)
+            .await
+            .map_err(map_err)?;
         xfer.sink.file_start(name, dl.size());
         let mut file =
             std::fs::File::create(dest).with_context(|| format!("create {}", dest.display()))?;
@@ -371,8 +372,8 @@ impl MtpFs {
                 .list_objects(Some(parent))
                 .await
                 .map_err(map_err)?;
-            let read =
-                std::fs::read_dir(&local_dir).with_context(|| format!("read dir {}", local_dir.display()))?;
+            let read = std::fs::read_dir(&local_dir)
+                .with_context(|| format!("read dir {}", local_dir.display()))?;
             for entry in read {
                 let entry =
                     entry.with_context(|| format!("read entry in {}", local_dir.display()))?;
@@ -475,11 +476,7 @@ impl Fs for MtpFs {
                     None => return Ok(Vec::new()),
                 }
             };
-            let objects = self
-                .storage
-                .list_objects(parent)
-                .await
-                .map_err(map_err)?;
+            let objects = self.storage.list_objects(parent).await.map_err(map_err)?;
 
             // Many MTP devices (Android, Kindle) put the modification date right
             // in the ObjectInfo dataset. Many PTP cameras (the Fuji here) leave
@@ -597,7 +594,11 @@ impl Fs for MtpFs {
                         parts.reverse();
                         parts.join("/")
                     };
-                    FolderSize { object_id: handle, rel_path, size }
+                    FolderSize {
+                        object_id: handle,
+                        rel_path,
+                        size,
+                    }
                 })
                 .collect();
             Ok(out)
@@ -618,7 +619,12 @@ impl Fs for MtpFs {
         // to the open-time value so the footer shows a stale number, not nothing.
         let _g = self.op_lock.lock().expect("op_lock poisoned");
         block_on(async {
-            match self.device.session().get_storage_info(self.storage.id()).await {
+            match self
+                .device
+                .session()
+                .get_storage_info(self.storage.id())
+                .await
+            {
                 Ok(info) => Some(StorageInfo {
                     free_bytes: info.free_space_bytes,
                     total_bytes: info.max_capacity,
@@ -643,7 +649,8 @@ impl Fs for MtpFs {
                 self.download_folder(obj.handle, dest, xfer).await
             } else {
                 let name = path.name().unwrap_or_default();
-                self.download_file_streaming(obj.handle, dest, name, xfer).await
+                self.download_file_streaming(obj.handle, dest, name, xfer)
+                    .await
             }
         })
     }
@@ -664,7 +671,8 @@ impl Fs for MtpFs {
             // Iterative (explicit stack) like `dir_sizes_by_id`/`download_folder`
             // so deep trees can't blow the call stack and we hold one `op_lock`
             // for the whole walk. Each item: (listing arg, that folder's path).
-            let mut stack: Vec<(Option<ObjectHandle>, String)> = vec![(root_handle, root.to_string())];
+            let mut stack: Vec<(Option<ObjectHandle>, String)> =
+                vec![(root_handle, root.to_string())];
             let mut batch: Vec<WalkEntry> = Vec::with_capacity(WALK_BATCH);
             while let Some((parent, dir)) = stack.pop() {
                 if cancel.load(Ordering::Relaxed) {
@@ -730,18 +738,13 @@ impl Fs for MtpFs {
             // destination folder and recurse. Plain file: the single-object
             // path below. We branch on the *local* fs type, mirroring how
             // `download_to` branches on the *device* object type.
-            let meta = std::fs::metadata(src)
-                .with_context(|| format!("stat {}", src.display()))?;
+            let meta = std::fs::metadata(src).with_context(|| format!("stat {}", src.display()))?;
             let parent_path = dest.parent().unwrap_or_default();
             let name = dest
                 .name()
                 .ok_or_else(|| anyhow!("upload: empty destination path"))?;
             let parent = self.ensure_folder(&parent_path).await?;
-            let existing = self
-                .storage
-                .list_objects(parent)
-                .await
-                .map_err(map_err)?;
+            let existing = self.storage.list_objects(parent).await.map_err(map_err)?;
 
             if meta.is_dir() {
                 // Resolve a top-level folder clash per the dialog's choice:
@@ -765,7 +768,8 @@ impl Fs for MtpFs {
 
             // `merge` is folder-only; on a file (including one the UI mis-guessed
             // as a folder) it means the same as Replace.
-            self.upload_file(parent, name, src, &existing, overwrite || merge, xfer).await
+            self.upload_file(parent, name, src, &existing, overwrite || merge, xfer)
+                .await
         })
     }
 
@@ -807,11 +811,18 @@ impl Fs for MtpFs {
         })
     }
 
-    fn move_to(&self, from: &TPath, dest_dir: &TPath, dest_name: &str, overwrite: bool)
-        -> Result<()> {
+    fn move_to(
+        &self,
+        from: &TPath,
+        dest_dir: &TPath,
+        dest_name: &str,
+        overwrite: bool,
+    ) -> Result<()> {
         let _g = self.op_lock.lock().expect("op_lock poisoned");
         block_on(async {
-            let src_name = from.name().ok_or_else(|| anyhow!("move: empty source path"))?;
+            let src_name = from
+                .name()
+                .ok_or_else(|| anyhow!("move: empty source path"))?;
 
             // No-op only when nothing changes: same folder AND same name. (A
             // same-folder rename comes through `rename`, not here; and a
@@ -833,7 +844,9 @@ impl Fs for MtpFs {
             } else {
                 match self.resolve_object(dest_dir).await? {
                     Some(obj) if obj.is_folder() => Some(obj.handle),
-                    Some(_) => return Err(anyhow!("move: destination `{dest_dir}` is not a folder")),
+                    Some(_) => {
+                        return Err(anyhow!("move: destination `{dest_dir}` is not a folder"))
+                    }
                     None => return Err(anyhow!("move: destination folder `{dest_dir}` not found")),
                 }
             };
@@ -850,7 +863,9 @@ impl Fs for MtpFs {
                         .await
                         .with_context(|| format!("replace `{dest_name}`"))?;
                 } else {
-                    return Err(anyhow!("`{dest_name}` already exists in the destination folder"));
+                    return Err(anyhow!(
+                        "`{dest_name}` already exists in the destination folder"
+                    ));
                 }
             }
 
@@ -879,7 +894,13 @@ impl Fs for MtpFs {
         })
     }
 
-    fn copy_to(&self, from: &TPath, dest_dir: &TPath, dest_name: &str, xfer: &Transfer) -> Result<()> {
+    fn copy_to(
+        &self,
+        from: &TPath,
+        dest_dir: &TPath,
+        dest_name: &str,
+        xfer: &Transfer,
+    ) -> Result<()> {
         let _g = self.op_lock.lock().expect("op_lock poisoned");
         block_on(async {
             let src = self
@@ -893,7 +914,9 @@ impl Fs for MtpFs {
             } else {
                 match self.resolve_object(dest_dir).await? {
                     Some(obj) if obj.is_folder() => Some(obj.handle),
-                    Some(_) => return Err(anyhow!("copy: destination `{dest_dir}` is not a folder")),
+                    Some(_) => {
+                        return Err(anyhow!("copy: destination `{dest_dir}` is not a folder"))
+                    }
                     None => return Err(anyhow!("copy: destination folder `{dest_dir}` not found")),
                 }
             };
@@ -915,7 +938,9 @@ impl Fs for MtpFs {
             // guard here keeps the trait honest for any caller.
             let existing = self.storage.list_objects(parent).await.map_err(map_err)?;
             if existing.iter().any(|o| o.filename == dest_name) {
-                return Err(anyhow!("`{dest_name}` already exists in the destination folder"));
+                return Err(anyhow!(
+                    "`{dest_name}` already exists in the destination folder"
+                ));
             }
 
             // Fast path: a file copied under its own name on a device that
@@ -947,10 +972,13 @@ impl Fs for MtpFs {
                 self.download_folder(src.handle, &local, &dl).await?;
                 // `dest_name` is free here (refused above), so nothing collides;
                 // pass overwrite = false to keep copy's never-overwrite contract.
-                self.upload_folder(&local, &dest_dir.join(dest_name), false, xfer).await?;
+                self.upload_folder(&local, &dest_dir.join(dest_name), false, xfer)
+                    .await?;
             } else {
-                self.download_file_streaming(src.handle, &local, dest_name, &dl).await?;
-                self.upload_file(parent, dest_name, &local, &existing, false, xfer).await?;
+                self.download_file_streaming(src.handle, &local, dest_name, &dl)
+                    .await?;
+                self.upload_file(parent, dest_name, &local, &existing, false, xfer)
+                    .await?;
             }
             Ok(())
         })
@@ -990,7 +1018,11 @@ impl Fs for MtpFs {
             } else {
                 self.resolve(&parent).await?
             };
-            let siblings = self.storage.list_objects(parent_handle).await.map_err(map_err)?;
+            let siblings = self
+                .storage
+                .list_objects(parent_handle)
+                .await
+                .map_err(map_err)?;
             if siblings.iter().any(|o| o.filename == new_name) {
                 return Err(anyhow!("`{new_name}` already exists in this folder"));
             }
@@ -1114,7 +1146,10 @@ pub fn liveness(err: &anyhow::Error) -> Liveness {
 /// property is supported or both come back empty/unparseable — the caller reads
 /// that as "this device won't answer" and stops probing the rest of the listing.
 async fn fetch_object_date(session: &PtpSession, handle: ObjectHandle) -> Option<i64> {
-    for prop in [ObjectPropertyCode::DateModified, ObjectPropertyCode::DateCreated] {
+    for prop in [
+        ObjectPropertyCode::DateModified,
+        ObjectPropertyCode::DateCreated,
+    ] {
         match session.get_object_prop_value(handle, prop).await {
             Ok(bytes) => match parse_prop_datetime(&bytes) {
                 Some(ts) => return Some(ts),
@@ -1173,21 +1208,42 @@ mod tests {
 
     #[test]
     fn datetime_to_unix_epoch() {
-        let dt = DateTime { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0 };
+        let dt = DateTime {
+            year: 1970,
+            month: 1,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            second: 0,
+        };
         assert_eq!(datetime_to_unix(&dt), 0);
     }
 
     #[test]
     fn datetime_to_unix_known_instant() {
         // 2024-03-16T09:00:00 interpreted as UTC. Cross-checked: 1710579600.
-        let dt = DateTime { year: 2024, month: 3, day: 16, hour: 9, minute: 0, second: 0 };
+        let dt = DateTime {
+            year: 2024,
+            month: 3,
+            day: 16,
+            hour: 9,
+            minute: 0,
+            second: 0,
+        };
         assert_eq!(datetime_to_unix(&dt), 1_710_579_600);
     }
 
     #[test]
     fn datetime_to_unix_leap_day() {
         // 2020-02-29T12:00:00 UTC == 1582977600. Exercises the Jan/Feb prior-year shift.
-        let dt = DateTime { year: 2020, month: 2, day: 29, hour: 12, minute: 0, second: 0 };
+        let dt = DateTime {
+            year: 2020,
+            month: 2,
+            day: 29,
+            hour: 12,
+            minute: 0,
+            second: 0,
+        };
         assert_eq!(datetime_to_unix(&dt), 1_582_977_600);
     }
 

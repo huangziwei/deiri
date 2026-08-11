@@ -24,7 +24,10 @@ use crate::thumb_protocol::slugify_device_id;
 /// the leaf name is preserved so the default app sees the right extension and
 /// window title.
 pub fn cache_path(app: &AppHandle, device_id: &str, object_id: u32, name: &str) -> Result<PathBuf> {
-    let root = app.path().app_cache_dir().context("resolve app cache dir")?;
+    let root = app
+        .path()
+        .app_cache_dir()
+        .context("resolve app cache dir")?;
     Ok(root
         .join("open")
         .join(slugify_device_id(device_id))
@@ -45,7 +48,9 @@ pub fn ensure_local_copy(
 ) -> Result<PathBuf> {
     let src = TPath::parse(path);
     let device_id = state.device_id()?;
-    let name = src.name().ok_or_else(|| anyhow!("can't open the device root"))?;
+    let name = src
+        .name()
+        .ok_or_else(|| anyhow!("can't open the device root"))?;
     let dest = cache_path(app, &device_id, object_id, name)?;
     if !dest.exists() {
         // `download_to` only mkdirs for the folder branch, so create the parent.

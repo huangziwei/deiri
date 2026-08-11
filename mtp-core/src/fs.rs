@@ -155,8 +155,13 @@ pub trait Fs: Send + Sync {
     /// never silently overwrite). Errors if `from` is missing or `dest_dir`
     /// isn't a folder. Moving an object to its current folder under its current
     /// name is a no-op. Backs the drag move and paste-cut.
-    fn move_to(&self, from: &TPath, dest_dir: &TPath, dest_name: &str, overwrite: bool)
-        -> Result<()>;
+    fn move_to(
+        &self,
+        from: &TPath,
+        dest_dir: &TPath,
+        dest_name: &str,
+        overwrite: bool,
+    ) -> Result<()>;
 
     /// Copy the object at `from` into the folder `dest_dir` (device-relative;
     /// empty = storage root) under the name `dest_name`. Backs Copy/Paste and
@@ -174,5 +179,11 @@ pub trait Fs: Send + Sync {
     /// a folder would be copied into itself or one of its descendants. Byte
     /// progress and cancellation flow through `xfer` (only the re-upload leg of
     /// a round-trip reports bytes; the device-side copy is effectively instant).
-    fn copy_to(&self, from: &TPath, dest_dir: &TPath, dest_name: &str, xfer: &Transfer) -> Result<()>;
+    fn copy_to(
+        &self,
+        from: &TPath,
+        dest_dir: &TPath,
+        dest_name: &str,
+        xfer: &Transfer,
+    ) -> Result<()>;
 }

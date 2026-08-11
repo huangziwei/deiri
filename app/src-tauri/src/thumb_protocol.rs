@@ -13,9 +13,9 @@
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use mtp_core::Fs;
-use tauri::http::{Request, Response, StatusCode, header};
+use tauri::http::{header, Request, Response, StatusCode};
 use tauri::{AppHandle, Manager, UriSchemeContext, Wry};
 
 use crate::state::AppState;
@@ -87,7 +87,10 @@ fn parse_object_id(path: &str) -> Result<u32> {
 }
 
 fn cache_path_for(app: &AppHandle, device_id: &str, object_id: u32) -> Result<PathBuf> {
-    let root = app.path().app_cache_dir().context("resolve app cache dir")?;
+    let root = app
+        .path()
+        .app_cache_dir()
+        .context("resolve app cache dir")?;
     Ok(root
         .join("thumbs")
         .join(slugify_device_id(device_id))
