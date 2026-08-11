@@ -27,6 +27,18 @@ window.api = {
   quickLookObject: (path, objectId) =>
     TAURI.core.invoke("quicklook_object", { args: { path, object_id: objectId } }),
 
+  // USB watchdog (see device_watch.rs). Both return a Promise of unlisten.
+  //
+  // `devices-changed`: the set of connected MTP devices differs from the last
+  // poll — something was plugged in or pulled out. Re-enumerate.
+  //
+  // `device-lost` ({ device_id }): the open session is dead and the backend has
+  // already dropped it. Enumeration alone can't detect this — a replugged device
+  // reports the same serial and the same topology-derived location — so the
+  // watchdog proves liveness with a round-trip and tells us the verdict.
+  onDevicesChanged: (handler) => TAURI.event.listen("devices-changed", handler),
+  onDeviceLost: (handler) => TAURI.event.listen("device-lost", handler),
+
   // Webview drag-drop (Finder → app). Returns an unlisten function.
   onDragDrop: (handler) => TAURI.webview.getCurrentWebview().onDragDropEvent(handler),
 

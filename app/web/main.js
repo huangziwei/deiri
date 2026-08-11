@@ -54,6 +54,12 @@ const conflictCloseBtn = $("conflict-close");
 // App state
 
 let openDeviceId = null;
+// The device that was open when the session died, and the folder we were in.
+// A replug of the same hardware reopens it and lands back there instead of at
+// the root — an unplug is rarely a decision to start over. Cleared by the next
+// successful open. See clearOpenDevice / openDevice.
+let lostDeviceId = null;
+let lostCwd = "";
 // Search state (see the Search section). `currentFolderQuery` drives the live
 // current-folder filter; the rest back Everywhere (recursive) results.
 let currentFolderQuery = null;
@@ -170,7 +176,25 @@ function deviceLabel(d) {
   return deviceAliases[d.id] || d.label;
 }
 
-async function refreshDevices({ autoOpen = false } = {}) {
+// Serializes refreshDevices passes. Several triggers can now fire at once —
+// window focus, the watchdog's devices-changed and device-lost, the chip menu —
+// and overlapping passes would each read the bus and each decide to auto-open,
+// racing on open_device. Enumeration is cheap, so queue rather than coalesce:
+// dropping a pass could drop the auto-open request that recovers a replug.
+let deviceRefreshChain = Promise.resolve();
+
+function refreshDevices(opts = {}) {
+  // A pass that threw must not poison the ones behind it.
+  deviceRefreshChain = deviceRefreshChain.catch(() => {}).then(() => doRefreshDevices(opts));
+  return deviceRefreshChain;
+}
+
+// `lost` is the device id the watchdog just declared dead: tear that session
+// down before re-enumerating. It rides along here rather than being handled in
+// the event listener so teardown and re-open stay on the one serialized chain.
+async function doRefreshDevices({ autoOpen = false, lost = null } = {}) {
+  if (lost && lost === openDeviceId) await clearOpenDevice();
+
   let devices;
   try {
     devices = await window.api.invoke("list_devices");
@@ -181,9 +205,10 @@ async function refreshDevices({ autoOpen = false } = {}) {
   lastDevices = devices;
 
   // If the device we had open vanished from the bus (unplugged or ejected),
-  // tear down the session so its now-stale listing doesn't linger. This runs
-  // on window focus, which fires right when the user returns after pulling
-  // the cable, so it's the natural place to notice.
+  // tear down the session so its now-stale listing doesn't linger. The backend
+  // watchdog normally gets there first (and covers the case enumeration can't
+  // see — a device unplugged and replugged reports the same id); this is the
+  // belt-and-braces check for the enumerations we do ourselves.
   if (openDeviceId && !devices.some((d) => d.id === openDeviceId)) {
     await clearOpenDevice();
   }
@@ -193,12 +218,23 @@ async function refreshDevices({ autoOpen = false } = {}) {
   if (!deviceMenu.hidden) renderDeviceMenu();
 
   if (autoOpen && !openDeviceId && devices.length > 0) {
-    // Multi-device at startup: open the first. The user can switch via the
-    // chip; the alphabetical order from list_devices is stable enough that
+    // Prefer the device we just lost, so a replug puts you back on the same
+    // hardware even when another device is also connected. Otherwise open the
+    // first: the alphabetical order from list_devices is stable enough that
     // "first" is a meaningful concept.
-    await openDevice(devices[0]);
+    const target = devices.find((d) => d.id === lostDeviceId) || devices[0];
+    await openDevice(target, { auto: true });
   }
 }
+
+// Number of open attempts for an automatic (hot-plug / replug) open, and the
+// gap between them. A device that has just appeared on the bus isn't
+// necessarily ready: macOS may still be settling the interface, and on a
+// camera `ptpcamerad` can hold it briefly before letting go.
+const AUTO_OPEN_TRIES = 4;
+const AUTO_OPEN_RETRY_MS = 600;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function updateDeviceChip() {
   const open = lastDevices.find((d) => d.id === openDeviceId);
@@ -326,26 +362,54 @@ deviceRenameInput.addEventListener("keydown", (ev) => {
 });
 deviceRenameInput.addEventListener("blur", commitRename);
 
-async function openDevice(d) {
-  try {
-    await window.api.invoke("open_device", {
-      args: { device_id: d.id, location_id: d.location_id },
-    });
-  } catch (err) {
-    console.error("open_device failed", err);
-    alert(`Couldn't open ${d.label}:\n\n${err}`);
-    return;
+// Open `d` and show its root. `auto` marks an open the user didn't ask for
+// (startup, hot-plug, replug recovery): those retry while the device settles and
+// fail quietly, since a modal about something you didn't click is just noise —
+// the chip stays on "No device" and clicking it retries.
+async function openDevice(d, { auto = false } = {}) {
+  const tries = auto ? AUTO_OPEN_TRIES : 1;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await window.api.invoke("open_device", {
+        args: { device_id: d.id, location_id: d.location_id },
+      });
+      break;
+    } catch (err) {
+      if (attempt < tries) {
+        await sleep(AUTO_OPEN_RETRY_MS);
+        continue;
+      }
+      console.error("open_device failed", err);
+      if (!auto) alert(`Couldn't open ${d.label}:\n\n${err}`);
+      return;
+    }
   }
+  // Reopening the device we just lost: land back where the user was rather than
+  // at the root. Paths survive a session change (object handles don't), so the
+  // folder is usually still addressable — but it may have been removed on the
+  // device meanwhile, hence the fallback below.
+  const resume = d.id === lostDeviceId ? lostCwd : "";
+  lostDeviceId = null;
+  lostCwd = "";
   openDeviceId = d.id;
-  cwd = "";
-  navHistory = [""]; // fresh history rooted at the device's top level
+  cwd = resume;
+  navHistory = [resume]; // fresh history rooted where we landed
   navIndex = 0;
   emptyEl.hidden = true;
   clipboard = null; // paths from any prior device are meaningless in a new session
   invalidateFolderSizes(); // new session — old handles (and their sizes) are meaningless
   updateDeviceChip();
   updateNavButtons();
-  await Promise.all([refreshList(), refreshStorage()]);
+  const listing = refreshList().catch(async (err) => {
+    if (!cwd) throw err; // already at the root — nothing left to fall back to
+    console.error(`resuming ${cwd} failed; falling back to the device root`, err);
+    cwd = "";
+    navHistory = [""];
+    navIndex = 0;
+    updateNavButtons();
+    await refreshList();
+  });
+  await Promise.all([listing, refreshStorage()]);
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +464,14 @@ function updateNavButtons() {
 // refreshList() so that call short-circuits to an empty render instead of
 // hitting list_dir against a dead session.
 async function clearOpenDevice() {
+  // Remember where we were, so a replug of the same device can resume instead
+  // of dumping the user at the root. See openDevice. Guarded because a loss can
+  // reach us twice (the watchdog's device-lost and its devices-changed both land
+  // when a cable is pulled) and the second pass must not erase the first's note.
+  if (openDeviceId) {
+    lostDeviceId = openDeviceId;
+    lostCwd = cwd;
+  }
   openDeviceId = null;
   cwd = "";
   navHistory = [];
@@ -2885,6 +2957,23 @@ deviceChipChevron.addEventListener("click", (ev) => {
 // Re-enumerate when the window regains focus so hot-plugged devices show up
 // without the user having to open the chip menu first. Cheap call.
 window.addEventListener("focus", () => { refreshDevices(); });
+
+// The USB watchdog (device_watch.rs) is what makes unplugging work while the
+// app is in front — window focus never fires, so nothing else would notice.
+//
+// `device-lost`: the backend has already dropped the dead session. Reset the
+// view, then re-enumerate: if the cable is back the device reopens right here,
+// which is the whole point — a replug reports the same id and the same
+// topology-derived location, so nothing short of the backend's liveness probe
+// can tell it apart from a device that never left, and without this the app
+// would sit on a dead session failing every click.
+window.api.onDeviceLost(({ payload }) => {
+  refreshDevices({ lost: payload.device_id, autoOpen: true });
+});
+
+// A device arrived or left. autoOpen only bites when nothing is open, so
+// plugging in a second device never yanks you off the one you're using.
+window.api.onDevicesChanged(() => { refreshDevices({ autoOpen: true }); });
 
 viewListBtn.addEventListener("click", () => setViewMode("list"));
 viewGridBtn.addEventListener("click", () => setViewMode("grid"));

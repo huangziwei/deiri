@@ -1,4 +1,5 @@
 mod commands;
+mod device_watch;
 mod open_file;
 mod state;
 mod thumb_protocol;
@@ -96,9 +97,10 @@ pub fn run() {
                 api.prevent_close();
             }
         })
-        .setup(|_app| {
+        .setup(|app| {
             #[cfg(target_os = "macos")]
-            file_promise::install_for_window(_app)?;
+            file_promise::install_for_window(app)?;
+            device_watch::spawn(app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!())

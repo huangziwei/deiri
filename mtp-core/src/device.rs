@@ -27,7 +27,12 @@ pub struct DeviceDescriptor {
     pub location_id: u64,
 }
 
-pub fn list_devices() -> anyhow::Result<Vec<DeviceDescriptor>> {
+/// Enumerate the bus without logging.
+///
+/// The device watchdog polls this every couple of seconds for the life of the
+/// app; at that rate [`list_devices`]'s descriptor dump would bury everything
+/// else in the log. The watchdog logs the transitions instead.
+pub fn enumerate() -> anyhow::Result<Vec<DeviceDescriptor>> {
     let devices = mtp_rs::MtpDevice::list_devices()
         .map_err(|e| anyhow::anyhow!("MTP enumeration failed: {e}"))?;
 
@@ -53,6 +58,15 @@ pub fn list_devices() -> anyhow::Result<Vec<DeviceDescriptor>> {
             }
         })
         .collect();
+
+    Ok(descriptors)
+}
+
+/// [`enumerate`] plus a log line describing what's on the bus. Backs the
+/// `list_devices` command, which only runs on user-visible events (startup,
+/// opening the device menu, a hot-plug), so the dump stays worth reading.
+pub fn list_devices() -> anyhow::Result<Vec<DeviceDescriptor>> {
+    let descriptors = enumerate()?;
 
     tracing::info!(
         count = descriptors.len(),

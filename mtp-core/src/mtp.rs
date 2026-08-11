@@ -94,6 +94,33 @@ impl MtpFs {
         })
     }
 
+    /// Ask the device whether it's still there, with one `GetStorageInfo`
+    /// round-trip — the cheapest transaction that proves the session still
+    /// reaches real hardware.
+    ///
+    /// `Ok(true)` = it answered. `Ok(false)` = another op holds `op_lock`, so
+    /// nothing was asked; a busy session is a live one, and this must never
+    /// block behind a minutes-long transfer. On `Err`, pass it to [`liveness`]:
+    /// only [`Liveness::Gone`] means the session is dead.
+    ///
+    /// Enumeration can't answer this question — mtp-rs derives `location_id`
+    /// from the port topology and the USB serial is stable across reconnects, so
+    /// a device that was unplugged and replugged looks identical to one that
+    /// never left. Only a round-trip distinguishes them.
+    pub fn probe(&self) -> Result<bool> {
+        let Ok(_g) = self.op_lock.try_lock() else {
+            return Ok(false);
+        };
+        block_on(async {
+            self.device
+                .session()
+                .get_storage_info(self.storage.id())
+                .await
+                .map_err(map_err)
+        })?;
+        Ok(true)
+    }
+
     /// Walk `path` segment-by-segment, returning the final handle. `Ok(None)`
     /// if any segment is missing.
     async fn resolve(&self, path: &TPath) -> Result<Option<ObjectHandle>> {
@@ -1044,6 +1071,43 @@ fn map_err(err: mtp_rs::Error) -> anyhow::Error {
     }
 }
 
+/// What an [`Fs`] error proves about the USB session it came from. See
+/// [`liveness`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liveness {
+    /// The device answered — it's on the bus, it just refused this request.
+    Alive,
+    /// The device is off the bus. The session is unrecoverable: an [`MtpFs`] is
+    /// bound to one USB device *instance*, and replugging the same hardware
+    /// creates a new instance the old handle can never reach. The only fix is to
+    /// drop the session and [`MtpFs::open`] a fresh one.
+    Gone,
+    /// Neither is provable from this error (timeout, endpoint stall, local I/O).
+    Unknown,
+}
+
+/// Classify an error from any [`Fs`] call by what it says about the device.
+///
+/// Walks the `anyhow` cause chain for the underlying `mtp_rs::Error` — callers
+/// add context with `.context(…)`, so the transport error is rarely the outermost
+/// one. A PTP response code means the device processed the request and said no,
+/// which is positive proof it's still there.
+pub fn liveness(err: &anyhow::Error) -> Liveness {
+    for cause in err.chain() {
+        let Some(e) = cause.downcast_ref::<mtp_rs::Error>() else {
+            continue;
+        };
+        return match e {
+            mtp_rs::Error::Disconnected
+            | mtp_rs::Error::NoDevice
+            | mtp_rs::Error::SessionNotOpen => Liveness::Gone,
+            _ if e.response_code().is_some() => Liveness::Alive,
+            _ => Liveness::Unknown,
+        };
+    }
+    Liveness::Unknown
+}
+
 /// Best-effort fetch of a file's date via `GetObjectPropValue`, for devices that
 /// leave the dates empty in the `ObjectInfo` dataset (typical of PTP cameras).
 /// Tries `DateModified` first, then `DateCreated`. Returns `None` if neither
@@ -1125,5 +1189,44 @@ mod tests {
         // 2020-02-29T12:00:00 UTC == 1582977600. Exercises the Jan/Feb prior-year shift.
         let dt = DateTime { year: 2020, month: 2, day: 29, hour: 12, minute: 0, second: 0 };
         assert_eq!(datetime_to_unix(&dt), 1_582_977_600);
+    }
+
+    /// The verdict an op would reach on a transport error, mapped the way every
+    /// call site maps it.
+    fn verdict(e: mtp_rs::Error) -> Liveness {
+        liveness(&map_err(e))
+    }
+
+    #[test]
+    fn liveness_reads_a_gone_device() {
+        assert_eq!(verdict(mtp_rs::Error::Disconnected), Liveness::Gone);
+        assert_eq!(verdict(mtp_rs::Error::NoDevice), Liveness::Gone);
+        assert_eq!(verdict(mtp_rs::Error::SessionNotOpen), Liveness::Gone);
+    }
+
+    #[test]
+    fn liveness_looks_through_added_context() {
+        // Ops annotate their errors on the way up; the verdict has to survive it,
+        // or a lost device would read as merely Unknown and never be torn down.
+        let err = map_err(mtp_rs::Error::Disconnected)
+            .context("download foo.jpg")
+            .context("save to ~/Pictures");
+        assert_eq!(liveness(&err), Liveness::Gone);
+    }
+
+    #[test]
+    fn liveness_treats_a_refusal_as_proof_of_life() {
+        // The device processed the request and said no — the session is fine.
+        let refused = mtp_rs::Error::Protocol {
+            code: ResponseCode::AccessDenied,
+            operation: OperationCode::GetStorageInfo,
+        };
+        assert_eq!(verdict(refused), Liveness::Alive);
+    }
+
+    #[test]
+    fn liveness_admits_what_it_cant_tell() {
+        assert_eq!(verdict(mtp_rs::Error::Timeout), Liveness::Unknown);
+        assert_eq!(liveness(&anyhow!("object not found")), Liveness::Unknown);
     }
 }

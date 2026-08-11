@@ -54,13 +54,12 @@ pub async fn open_device(
     // untouched and still holds the device. For a *different* device we keep the
     // current session until the new one opens, so a failed switch (e.g. the
     // target is busy in another app) doesn't leave us with no session at all.
-    let holding_same = {
-        let guard = state.current.lock().map_err(|_| "session lock poisoned".to_string())?;
-        guard.as_ref().is_some_and(|s| s.device_id == args.device_id)
-    };
+    let holding_same = state
+        .session()
+        .map_err(err)?
+        .is_some_and(|s| s.device_id == args.device_id);
     if holding_same {
-        let mut guard = state.current.lock().map_err(|_| "session lock poisoned".to_string())?;
-        *guard = None; // drops the old MtpFs, releasing its USB device
+        state.close().map_err(err)?; // drops the old MtpFs, releasing its USB device
     }
 
     let fs = MtpFs::open(args.location_id).map_err(err)?;
@@ -70,19 +69,17 @@ pub async fn open_device(
     // failed open doesn't trash a still-good cache.
     thumb_protocol::clear_for_device(&app, &args.device_id);
     crate::open_file::clear_for_device(&app, &args.device_id);
-    let mut guard = state.current.lock().map_err(|_| "session lock poisoned".to_string())?;
-    *guard = Some(OpenSession {
-        device_id: args.device_id,
-        fs,
-    });
-    Ok(())
+    state
+        .set_session(OpenSession {
+            device_id: args.device_id,
+            fs,
+        })
+        .map_err(err)
 }
 
 #[tauri::command]
 pub async fn close_device(state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.current.lock().map_err(|_| "session lock poisoned".to_string())?;
-    *guard = None;
-    Ok(())
+    state.close().map_err(err)
 }
 
 #[tauri::command]
@@ -98,7 +95,7 @@ pub struct DirSizeArgs {
 /// Recursive sizes of a folder and every folder beneath it (by object handle),
 /// for the "Calculate Size" menu action. One walk returns the whole subtree's
 /// per-folder totals so the UI can cache them all. Potentially slow — one
-/// round-trip per object — and serialized behind the session lock.
+/// round-trip per object — and serialized behind the session's op lock.
 #[tauri::command]
 pub async fn dir_sizes(args: DirSizeArgs, state: State<'_, AppState>) -> Result<Vec<FolderSize>, String> {
     state.with_fs(|fs| fs.dir_sizes_by_id(args.object_id)).map_err(err)
@@ -398,8 +395,8 @@ pub async fn copy_objects(
 }
 
 /// Request cancellation of the running job (transfer or search) `job`. Touches
-/// only atomics (never the session lock, which the running job holds), so it
-/// returns promptly mid-flight; the job aborts at its next chunk/folder.
+/// only atomics (never the op lock, which the running job holds), so it returns
+/// promptly mid-flight; the job aborts at its next chunk/folder.
 #[tauri::command]
 pub async fn cancel_transfer(job: u64, state: State<'_, AppState>) -> Result<(), String> {
     state.request_cancel(job);
@@ -410,7 +407,7 @@ pub async fn cancel_transfer(job: u64, state: State<'_, AppState>) -> Result<(),
 // Everywhere search — a cancellable subtree walk that streams every object to
 // the frontend, which matches each batch against the query (so the query
 // language lives in one place, JS). Reuses the transfer job/cancel atoms: only
-// one long device job runs at a time since both hold the session lock, and
+// one long device job runs at a time since both hold the session's op lock, and
 // `cancel_transfer` stops either.
 
 #[derive(Clone, Serialize)]
