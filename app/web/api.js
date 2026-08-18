@@ -23,9 +23,22 @@ window.api = {
     TAURI.core.invoke("open_object", { args: { path, object_id: objectId } }),
 
   // Quick Look a device file (macOS QLPreviewPanel). Same temp-copy pull as
-  // openObject; Space again on the same file toggles the panel closed.
-  quickLookObject: (path, objectId) =>
-    TAURI.core.invoke("quicklook_object", { args: { path, object_id: objectId } }),
+  // openObject. `toggle` is Space's dismiss-on-repeat — pass it only for the
+  // shortcut itself, so arrow navigation can land back on the file already
+  // showing without closing the panel.
+  quickLookObject: (path, objectId, toggle) =>
+    TAURI.core.invoke("quicklook_object", { args: { path, object_id: objectId, toggle } }),
+
+  // Is the preview panel still on screen? Asked before following a selection
+  // change with a new preview, since the panel can outlive the keypress that
+  // opened it (click back into the window and it stays up).
+  quickLookPanelVisible: () => TAURI.core.invoke("quicklook_panel_visible"),
+
+  // Arrow keys pressed while the preview panel had focus. The panel is the key
+  // window then, so the WebView never sees them — Swift catches them and
+  // forwards them here instead (see QuickLook.swift). Payload: { key } with a
+  // KeyboardEvent.key name. Returns a Promise of an unlisten function.
+  onQuickLookKey: (handler) => TAURI.event.listen("quicklook-key", handler),
 
   // USB watchdog (see device_watch.rs). Both return a Promise of unlisten.
   //

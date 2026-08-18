@@ -53,6 +53,7 @@ pub fn run() {
         commands::rename,
         commands::open_object,
         quicklook::quicklook_object,
+        quicklook::quicklook_panel_visible,
         commands::pick_folder,
         commands::confirm_dialog,
         commands::close_window,
@@ -100,6 +101,8 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "macos")]
             file_promise::install_for_window(app)?;
+            #[cfg(target_os = "macos")]
+            quicklook::install(app.handle());
             device_watch::spawn(app.handle().clone());
             Ok(())
         })

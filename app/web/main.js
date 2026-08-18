@@ -825,6 +825,24 @@ function moveSelection(target, extend) {
   scrollEntryIntoView(idx);
 }
 
+// Where an arrow / Home / End key moves the cursor, as a possibly out-of-range
+// index (moveSelection clamps). Null for a key that doesn't move it. Grid view
+// is 2-D, so ↑/↓ jump a whole row; list view has a single column. Shared with
+// the Quick Look panel's arrows, which arrive as events rather than keydowns.
+function cursorTargetFor(key) {
+  const last = entries.length - 1;
+  const cols = viewMode === "grid" ? gridColumns() : 1;
+  switch (key) {
+    case "ArrowDown":  return cursorIndex < 0 ? 0 : cursorIndex + cols;
+    case "ArrowUp":    return cursorIndex < 0 ? last : cursorIndex - cols;
+    case "ArrowRight": return cursorIndex < 0 ? 0 : cursorIndex + 1;
+    case "ArrowLeft":  return cursorIndex < 0 ? last : cursorIndex - 1;
+    case "Home":       return 0;
+    case "End":        return last;
+    default:           return null;
+  }
+}
+
 // Keep the keyboard lead visible as it moves. `block: "nearest"` scrolls the
 // minimum amount — no jump when the row is already on screen.
 function scrollEntryIntoView(idx) {
@@ -1316,32 +1334,91 @@ function openSelected() {
 }
 
 // Space = Quick Look the primary selected file (the anchor if it's a selected
-// file, else the first selected file). Folders aren't previewed. v1 shows one
-// file; arrow-through across a multi-selection is a follow-up.
+// file, else the first selected file). Folders aren't previewed. Space is also
+// what dismisses the panel, so it's the one caller that passes `toggle`.
 function quickLookSelected() {
   const anchor = entries[anchorIndex];
   if (anchor && !anchor.is_dir && selected.has(pathFor(anchor.name))) {
-    quickLook(anchor);
+    quickLook(anchor, true);
     return;
   }
   const file = [...selected]
     .map((p) => entries.find((x) => pathFor(x.name) === p))
     .find((e) => e && !e.is_dir);
-  if (file) quickLook(file);
+  if (file) quickLook(file, true);
 }
 
-async function quickLook(entry) {
-  const loading = `Loading preview of ${entry.name}…`;
-  const restore = statusEl.textContent;
-  statusEl.textContent = loading;
+// An arrow key the preview panel had focus for (see QuickLook.swift): move the
+// selection and preview what it lands on, so ↑/↓ walk the folder with the panel
+// following, as in Finder. Folders are stepped over — pulling a whole device
+// subtree to preview it isn't on — so the panel always has something to show.
+function quickLookStep(key) {
+  if (!openDeviceId || searchResultMode || entries.length === 0) return;
+  if (viewMode === "list" && (key === "ArrowLeft" || key === "ArrowRight")) return;
+  const target = cursorTargetFor(key);
+  if (target === null) return;
+  const last = entries.length - 1;
+  const step = key === "ArrowUp" || key === "ArrowLeft" ? -1 : 1;
+  let idx = Math.max(0, Math.min(target, last));
+  while (idx >= 0 && idx <= last && entries[idx].is_dir) idx += step;
+  if (idx < 0 || idx > last || idx === cursorIndex) return; // no file that way
+  moveSelection(idx, false);
+  quickLook(entries[idx]);
+}
+
+// Keep an open preview on the selected file after an arrow key the WebView
+// handled itself. Nothing to do unless a panel is actually up, and only the
+// panel knows that — but the check is a backend call, so `qlPanelMaybeOpen`
+// keeps it off the path of every arrow press in a session with no preview.
+let qlPanelMaybeOpen = false;
+
+async function previewFollowsSelection() {
+  if (!qlPanelMaybeOpen) return;
+  const visible = await window.api.quickLookPanelVisible().catch(() => false);
+  if (!visible) {
+    qlPanelMaybeOpen = false;
+    return;
+  }
+  const entry = entries[cursorIndex]; // re-read: more arrows may have landed
+  if (entry && !entry.is_dir) quickLook(entry);
+}
+
+// Previewing pulls the file off the device first, so a held-down arrow key would
+// otherwise queue one preview per file it passes over. Only the file the user
+// stops on matters: while one is loading we keep just the latest request and run
+// it when the current one lands.
+let qlLoading = false;
+let qlQueued = null;
+
+function quickLook(entry, toggle = false) {
+  qlQueued = { entry, toggle };
+  if (!qlLoading) runQuickLookQueue();
+}
+
+async function runQuickLookQueue() {
+  qlLoading = true;
   try {
-    await window.api.quickLookObject(pathFor(entry.name), entry.object_id);
-  } catch (err) {
-    console.error("quick look failed", entry.name, err);
+    while (qlQueued) {
+      const { entry, toggle } = qlQueued;
+      qlQueued = null;
+      const loading = `Loading preview of ${entry.name}…`;
+      const restore = statusEl.textContent;
+      statusEl.textContent = loading;
+      try {
+        await window.api.quickLookObject(pathFor(entry.name), entry.object_id, toggle);
+        qlPanelMaybeOpen = true;
+      } catch (err) {
+        console.error("quick look failed", entry.name, err);
+      } finally {
+        if (statusEl.textContent === loading) statusEl.textContent = restore;
+      }
+    }
   } finally {
-    if (statusEl.textContent === loading) statusEl.textContent = restore;
+    qlLoading = false;
   }
 }
+
+window.api.onQuickLookKey(({ payload }) => quickLookStep(payload.key));
 
 // ---------------------------------------------------------------------------
 // Name-conflict resolution
@@ -1962,18 +2039,12 @@ document.addEventListener("keydown", (ev) => {
     // its default; only the grid is 2-D.
     if (viewMode === "list" && (ev.key === "ArrowLeft" || ev.key === "ArrowRight")) return;
     ev.preventDefault(); // arrows otherwise scroll the container under us
-    const last = entries.length - 1;
-    const cols = viewMode === "grid" ? gridColumns() : 1;
-    let target;
-    switch (ev.key) {
-      case "ArrowDown":  target = cursorIndex < 0 ? 0 : cursorIndex + cols; break;
-      case "ArrowUp":    target = cursorIndex < 0 ? last : cursorIndex - cols; break;
-      case "ArrowRight": target = cursorIndex < 0 ? 0 : cursorIndex + 1; break;
-      case "ArrowLeft":  target = cursorIndex < 0 ? last : cursorIndex - 1; break;
-      case "Home":       target = 0; break;
-      case "End":        target = last; break;
-    }
-    moveSelection(target, ev.shiftKey);
+    moveSelection(cursorTargetFor(ev.key), ev.shiftKey);
+    // An open preview follows the selection, as in Finder. This arrow reached
+    // the WebView, so the panel doesn't have focus — but it may still be up
+    // (clicking back into the window leaves it open), which is what
+    // previewFollowsSelection checks before pulling anything.
+    if (!ev.shiftKey) previewFollowsSelection();
   } else if (ev.key === " ") {
     if (selected.size > 0) {
       ev.preventDefault(); // Quick Look — also stops Space scrolling the list
