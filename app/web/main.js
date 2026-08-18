@@ -1190,6 +1190,10 @@ document.addEventListener("contextmenu", (ev) => {
 
 async function deleteSelected() {
   if (selected.size === 0) return;
+  if (aLongJobRunning()) {
+    alert("A transfer or search is already in progress. Wait for it to finish or cancel it.");
+    return;
+  }
   const paths = [...selected];
   const message =
     paths.length === 1
@@ -1211,19 +1215,19 @@ async function deleteSelected() {
   console.log("confirm result:", ok);
   if (!ok) return;
 
-  for (const path of paths) {
-    const name = path.split("/").pop();
-    const ent = entries.find((x) => x.name === name);
-    if (!ent) continue;
-    try {
-      await window.api.invoke("delete", {
-        args: { path, recursive: ent.is_dir },
-      });
-    } catch (err) {
-      console.error("delete failed", path, err);
-      alert(`Couldn't delete ${name}:\n\n${err}`);
-      break;
-    }
+  // One tracked job for the whole selection: a folder delete is a device
+  // round-trip per object, so it gets the progress bar (and its Cancel) rather
+  // than looking hung for minutes. The backend skips paths already gone and
+  // stops at the first real failure.
+  const job = startTransfer("delete");
+  if (job === null) return; // a job slipped in while the dialog was up
+  try {
+    await window.api.deleteObjects(job, paths);
+  } catch (err) {
+    console.error("delete failed", paths, err);
+    alert(`Couldn't delete:\n\n${err}`);
+  } finally {
+    endTransfer();
   }
   // Targeted invalidation: the removed subtrees (whose handles may be reused)
   // and the parent chain whose totals shrank. Sibling folders keep their sizes.
@@ -2305,7 +2309,10 @@ function startTransfer(direction) {
   if (aLongJobRunning()) return null;
   const job = ++transferSeq;
   activeTransfer = { job, direction, cancelling: false };
-  transferLabel.textContent = direction === "upload" ? "Preparing upload…" : "Preparing…";
+  transferLabel.textContent =
+    direction === "upload" ? "Preparing upload…"
+      : direction === "delete" ? "Preparing to delete…"
+        : "Preparing…";
   transferCount.textContent = "";
   transferFill.style.width = "0%";
   transferCancelBtn.disabled = false;
@@ -2320,8 +2327,18 @@ function endTransfer() {
 
 window.api.onTransferProgress(({ payload }) => {
   if (!activeTransfer || payload.job !== activeTransfer.job) return;
+  // A delete counts objects, not bytes: file_index/file_count are objects done
+  // and the total, which stays 0 until the backend has finished walking the
+  // subtree (it can't know the total before then — see delete_objects).
+  const counting = payload.direction === "delete";
+  const index = payload.file_index.toLocaleString();
   if (activeTransfer.cancelling) {
     transferLabel.textContent = "Cancelling…";
+  } else if (counting) {
+    transferLabel.textContent =
+      payload.file_count > 0
+        ? `Deleting ${payload.file_name}`
+        : `Preparing to delete ${payload.file_name}…`;
   } else {
     const verb = payload.direction === "upload" ? "Uploading"
       : payload.direction === "copy" ? "Copying"
@@ -2330,14 +2347,20 @@ window.api.onTransferProgress(({ payload }) => {
   }
   transferCount.textContent =
     payload.file_count > 0
-      ? `${payload.file_index} of ${payload.file_count}`
-      : `${payload.file_index} file${payload.file_index === 1 ? "" : "s"}`;
+      ? `${index} of ${payload.file_count.toLocaleString()}`
+      : counting
+        ? `${index} item${payload.file_index === 1 ? "" : "s"} found`
+        : `${index} file${payload.file_index === 1 ? "" : "s"}`;
+  // Bytes when there are bytes; otherwise the job's own count (a delete, or a
+  // zero-byte file, has no byte progress to show).
   const pct =
     payload.file_total > 0
       ? Math.min(100, Math.round((payload.file_bytes / payload.file_total) * 100))
-      : payload.file_bytes > 0
-        ? 100
-        : 0;
+      : payload.file_count > 0
+        ? Math.min(100, Math.round((payload.file_index / payload.file_count) * 100))
+        : payload.file_bytes > 0
+          ? 100
+          : 0;
   transferFill.style.width = `${pct}%`;
 });
 

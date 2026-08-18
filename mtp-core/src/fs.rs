@@ -126,8 +126,21 @@ pub trait Fs: Send + Sync {
         xfer: &Transfer,
     ) -> Result<()>;
 
-    fn delete(&self, path: &TPath) -> Result<bool>;
-    fn delete_dir(&self, path: &TPath) -> Result<bool>;
+    /// Delete every object in `paths` — files, and folders with their whole
+    /// subtree — as one job. Paths that are already gone are skipped, as is an
+    /// object a selected ancestor already covers (the caller may pass both a
+    /// folder and something inside it).
+    ///
+    /// Deleting is one device round-trip per object, so a big folder takes
+    /// minutes with nothing moving over the wire; the job reports itself to
+    /// `xfer.sink` in two passes so the UI has something to show. First it
+    /// enumerates everything to delete (reporting a running found-count with
+    /// `total` 0 — the count isn't known until the walk ends), then it deletes,
+    /// counting off against that total. Both passes poll `xfer.cancel`:
+    /// cancelling stops between objects and leaves the rest in place, since a
+    /// delete can't be undone. Pass [`Transfer::noop`] to run it untracked.
+    fn delete_objects(&self, paths: &[TPath], xfer: &Transfer) -> Result<()>;
+
     fn create_dir(&self, path: &TPath) -> Result<()>;
     fn rename(&self, from: &TPath, to: &TPath) -> Result<()>;
 

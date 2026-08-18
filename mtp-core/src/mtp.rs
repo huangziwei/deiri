@@ -11,7 +11,7 @@
 //! (which chain walk + list + upload across multiple round-trips) so two UI
 //! events can't interleave on the same session.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -416,11 +416,10 @@ impl MtpFs {
         Ok(())
     }
 
-    /// Delete the object `root` and its whole subtree if it's a folder, leaves
-    /// first (PTP `DeleteObject` on a non-empty folder is undefined). A lone
-    /// file works too — it just has no children. Backs both `delete_dir` and the
-    /// Replace path of `move_to` / `upload_from_tracked`, and runs under a lock
-    /// the caller already holds.
+    /// Every handle in the subtree rooted at `root`, leaves first — the order
+    /// [`delete_subtree`](Self::delete_subtree) and [`delete_objects`](Fs::delete_objects)
+    /// must delete in, since PTP `DeleteObject` on a non-empty folder is
+    /// undefined. A lone file works too — it just has no children.
     ///
     /// Enumerates children by HANDLE only. A delete walk needs handles, not
     /// metadata — and `list_objects` fetches GetObjectInfo per child. Some Kindle
@@ -428,11 +427,38 @@ impl MtpFs {
     /// empty GetObjectInfo data phase, which fails ObjectInfo parsing
     /// ("insufficient bytes for u32") and would abort the whole delete.
     /// `get_object_handles` doesn't read metadata, so it walks them fine.
-    async fn delete_subtree(&self, root: ObjectHandle) -> Result<()> {
+    ///
+    /// The walk itself is a round-trip per object, so it's half the wait on a
+    /// big folder: `found` accumulates across calls (a delete job walks every
+    /// selected item before deleting any) and each object is reported to
+    /// `xfer.sink` as it's discovered, with `total` still unknown. Cancelling
+    /// here costs nothing — no object has been deleted yet.
+    ///
+    /// `seen` also accumulates across calls, so a selection holding both a
+    /// folder and something inside it (which search results can produce) yields
+    /// each object once: whichever was walked first keeps it, and the other walk
+    /// stops there rather than re-enumerating a subtree it already has. Deleting
+    /// a handle twice would fail — the second attempt has nothing to delete.
+    async fn collect_subtree(
+        &self,
+        root: ObjectHandle,
+        name: &str,
+        xfer: &Transfer<'_>,
+        found: &mut u64,
+        seen: &mut HashSet<ObjectHandle>,
+    ) -> Result<Vec<ObjectHandle>> {
         let mut stack = vec![root];
         let mut to_delete: Vec<ObjectHandle> = Vec::new();
         while let Some(h) = stack.pop() {
+            if xfer.cancelled() {
+                return Err(anyhow!("delete cancelled"));
+            }
+            if !seen.insert(h) {
+                continue; // already collected, subtree and all
+            }
             to_delete.push(h);
+            *found += 1;
+            xfer.sink.object_progress(name, *found, 0);
             let children = self
                 .device
                 .get_object_handles(self.storage.id(), Some(h))
@@ -442,7 +468,24 @@ impl MtpFs {
                 stack.push(ch);
             }
         }
-        for h in to_delete.into_iter().rev() {
+        // Parents are pushed before their children, so reversing puts every
+        // child ahead of its parent.
+        to_delete.reverse();
+        Ok(to_delete)
+    }
+
+    /// Delete the object `root` and its whole subtree if it's a folder, in one
+    /// go and untracked. Backs the Replace path of `move_to` /
+    /// `upload_from_tracked`, and runs under a lock the caller already holds.
+    /// The user-driven delete uses [`delete_objects`](Fs::delete_objects)
+    /// instead, which reports progress across a whole selection.
+    async fn delete_subtree(&self, root: ObjectHandle) -> Result<()> {
+        let mut found = 0;
+        let mut seen = HashSet::new();
+        let handles = self
+            .collect_subtree(root, "", &Transfer::noop(), &mut found, &mut seen)
+            .await?;
+        for h in handles {
             self.storage
                 .delete(h)
                 .await
@@ -773,33 +816,54 @@ impl Fs for MtpFs {
         })
     }
 
-    fn delete(&self, path: &TPath) -> Result<bool> {
+    fn delete_objects(&self, paths: &[TPath], xfer: &Transfer) -> Result<()> {
         let _g = self.op_lock.lock().expect("op_lock poisoned");
         block_on(async {
-            let handle = match self.resolve(path).await? {
-                Some(h) => h,
-                None => return Ok(false),
-            };
-            self.storage
-                .delete(handle)
-                .await
-                .map_err(map_err)
-                .with_context(|| format!("delete {path}"))?;
-            Ok(true)
-        })
-    }
+            // Pass 1: walk everything first, so the delete pass has a real
+            // total to count against. A file needs no walk — it has no
+            // children, and skipping it keeps a multi-file delete at the one
+            // round-trip per object it has always cost.
+            let mut jobs: Vec<(String, Vec<ObjectHandle>)> = Vec::with_capacity(paths.len());
+            let mut found: u64 = 0;
+            let mut seen: HashSet<ObjectHandle> = HashSet::new();
+            for path in paths {
+                let name = path.name().unwrap_or_default().to_string();
+                let obj = match self.resolve_object(path).await? {
+                    Some(o) => o,
+                    None => continue, // already gone (or the root, which we never delete)
+                };
+                let handles = if obj.is_folder() {
+                    self.collect_subtree(obj.handle, &name, xfer, &mut found, &mut seen)
+                        .await
+                        .with_context(|| format!("enumerate {path}"))?
+                } else if seen.insert(obj.handle) {
+                    found += 1;
+                    xfer.sink.object_progress(&name, found, 0);
+                    vec![obj.handle]
+                } else {
+                    continue; // a selected folder already covers it
+                };
+                jobs.push((name, handles));
+            }
 
-    fn delete_dir(&self, path: &TPath) -> Result<bool> {
-        let _g = self.op_lock.lock().expect("op_lock poisoned");
-        block_on(async {
-            let root = match self.resolve(path).await? {
-                Some(h) => h,
-                None => return Ok(false),
-            };
-            self.delete_subtree(root)
-                .await
-                .with_context(|| format!("delete_dir {path}"))?;
-            Ok(true)
+            // Pass 2: delete leaves-first, counting off against the total.
+            let total = found;
+            let mut done: u64 = 0;
+            for (name, handles) in jobs {
+                for h in handles {
+                    if xfer.cancelled() {
+                        return Err(anyhow!("delete cancelled"));
+                    }
+                    self.storage
+                        .delete(h)
+                        .await
+                        .map_err(map_err)
+                        .with_context(|| format!("delete {name}"))?;
+                    done += 1;
+                    xfer.sink.object_progress(&name, done, total);
+                }
+            }
+            Ok(())
         })
     }
 

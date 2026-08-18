@@ -114,28 +114,34 @@ pub async fn storage_info(state: State<'_, AppState>) -> Result<Option<StorageIn
 }
 
 // --------------------------------------------------------------------------
-// Transfers (upload / download) with progress + cancel.
+// Long device jobs (upload / download / copy / delete) with progress + cancel.
 //
-// Both directions run as one job: a single command loops over the items while
+// Each runs as one job: a single command loops over the items while
 // `EmitSink` streams throttled `transfer-progress` events to the frontend, and
-// the loop polls `AppState.transfer.cancel` between chunks (see mtp-core's
+// the loop polls `AppState.transfer.cancel` between chunks — or between objects
+// for a delete, which counts objects instead of bytes (see mtp-core's
 // `Transfer`). The frontend mints the job id and passes it in, so its panel can
 // appear and its Cancel button can work before the first byte moves. Drag-OUT
 // to Finder is native (no command), but reuses `EmitSink` from file_promise.rs
 // to drive the same bar — see `dragout_begin` there.
 
-/// One progress update for an in-flight transfer, emitted as `transfer-progress`.
+/// One progress update for an in-flight job, emitted as `transfer-progress`.
+///
+/// A delete moves no bytes, so it reuses the counter fields: `file_index` is
+/// objects finished, `file_count` the total once known, and the byte fields
+/// stay 0 (the frontend fills the bar from the counts instead).
 #[derive(Clone, Serialize)]
 struct TransferProgress {
     job: u64,
-    /// "upload" or "download" — drives the UI label/icon.
+    /// "upload", "download", "copy" or "delete" — drives the UI label/icon.
     direction: &'static str,
-    /// Name of the file currently moving.
+    /// Name of the file currently moving, or the item being deleted.
     file_name: String,
-    /// 1-based index of the current file across the whole job.
+    /// 1-based index of the current file across the whole job (objects finished,
+    /// for a delete).
     file_index: u32,
     /// Total files in the job, or 0 when unknown (e.g. a download of folders
-    /// whose contents we haven't walked).
+    /// whose contents we haven't walked, or a delete still enumerating).
     file_count: u32,
     /// Bytes transferred for the current file, and its total size.
     file_bytes: u64,
@@ -181,7 +187,14 @@ impl EmitSink {
         }
     }
 
-    fn emit(&self, file_index: u32, file_name: String, file_total: u64, file_bytes: u64) {
+    fn emit(
+        &self,
+        file_index: u32,
+        file_name: String,
+        file_count: u32,
+        file_total: u64,
+        file_bytes: u64,
+    ) {
         let _ = self.app.emit(
             "transfer-progress",
             TransferProgress {
@@ -189,7 +202,7 @@ impl EmitSink {
                 direction: self.direction,
                 file_name,
                 file_index,
-                file_count: self.file_count,
+                file_count,
                 file_bytes,
                 file_total,
             },
@@ -207,7 +220,7 @@ impl ProgressSink for EmitSink {
             g.last_emit = Some(Instant::now());
             (g.file_index, g.name.clone(), g.total)
         };
-        self.emit(idx, nm, tot, 0); // announce the new file immediately
+        self.emit(idx, nm, self.file_count, tot, 0); // announce the new file immediately
     }
 
     fn file_progress(&self, transferred: u64) {
@@ -227,7 +240,32 @@ impl ProgressSink for EmitSink {
             }
         };
         if let Some((idx, nm, tot)) = snapshot {
-            self.emit(idx, nm, tot, transferred); // emit outside the lock
+            self.emit(idx, nm, self.file_count, tot, transferred); // emit outside the lock
+        }
+    }
+
+    fn object_progress(&self, name: &str, done: u64, total: u64) {
+        // Same throttle as the byte stream, sharing its `last_emit` — a job
+        // counts either bytes or objects, never both. The last object always
+        // emits so the bar lands on 100% instead of stopping just short.
+        let due = {
+            let mut g = self.inner.lock().expect("sink lock poisoned");
+            let now = Instant::now();
+            let complete = total > 0 && done >= total;
+            let elapsed = match g.last_emit {
+                None => true,
+                Some(t) => now.duration_since(t) >= PROGRESS_INTERVAL,
+            };
+            if elapsed || complete {
+                g.last_emit = Some(now);
+                true
+            } else {
+                false
+            }
+        };
+        if due {
+            let clamp = |n: u64| u32::try_from(n).unwrap_or(u32::MAX);
+            self.emit(clamp(done), name.to_string(), clamp(total), 0, 0);
         }
     }
 }
@@ -516,23 +554,37 @@ pub async fn open_object(
 }
 
 #[derive(Deserialize)]
-pub struct DeleteArgs {
-    pub path: String,
-    pub recursive: bool,
+pub struct DeleteObjectsArgs {
+    /// Frontend-minted job id (also used to cancel).
+    pub job: u64,
+    /// Object paths on the device — files or folders, deleted with their
+    /// subtree. Paths that are already gone are skipped.
+    pub paths: Vec<String>,
 }
 
+/// Delete objects as one cancellable job. Nothing crosses the wire, but the
+/// device wants a round-trip per object in the subtree — a folder with tens of
+/// thousands of files takes minutes — so it runs tracked like a transfer:
+/// `transfer-progress` events carry the enumeration tally and then the
+/// object count, and `cancel_transfer` stops it between objects (whatever is
+/// already deleted stays deleted). See [`Fs::delete_objects`].
 #[tauri::command]
-pub async fn delete(args: DeleteArgs, state: State<'_, AppState>) -> Result<bool, String> {
-    let p = TPath::parse(&args.path);
-    state
-        .with_fs(|fs| {
-            if args.recursive {
-                fs.delete_dir(&p)
-            } else {
-                fs.delete(&p)
-            }
-        })
-        .map_err(err)
+pub async fn delete_objects(
+    app: AppHandle,
+    args: DeleteObjectsArgs,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.begin_transfer(args.job);
+    let sink = EmitSink::new(app.clone(), args.job, "delete", 0);
+    let paths: Vec<TPath> = args.paths.iter().map(|p| TPath::parse(p)).collect();
+    let result = state.with_fs(|fs| {
+        let xfer = Transfer {
+            sink: &sink,
+            cancel: &state.transfer.cancel,
+        };
+        fs.delete_objects(&paths, &xfer)
+    });
+    finish_transfer(state.inner(), args.job, result)
 }
 
 #[tauri::command]

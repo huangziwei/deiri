@@ -78,6 +78,12 @@ window.api = {
   // transfer job/cancel mechanism — cancel via cancelTransfer(job).
   copyObjects: (job, items, destDir) =>
     TAURI.core.invoke("copy_objects", { args: { job, items, dest_dir: destDir } }),
+  // Delete objects (files, or folders with their whole subtree) as one job.
+  // Nothing crosses the wire, but the device wants a round-trip per object, so
+  // it's tracked like a transfer: progress arrives as `transfer-progress` with
+  // direction "delete" (counting objects, not bytes) and cancelTransfer(job)
+  // stops it — already-deleted objects stay deleted.
+  deleteObjects: (job, paths) => TAURI.core.invoke("delete_objects", { args: { job, paths } }),
   cancelTransfer: (job) => TAURI.core.invoke("cancel_transfer", { job }),
   onTransferProgress: (handler) => TAURI.event.listen("transfer-progress", handler),
   // Backend-driven bar lifecycle for native drag-out (no frontend command mints

@@ -1,10 +1,11 @@
-//! Progress + cancellation plumbing for file transfers.
+//! Progress + cancellation plumbing for long device operations.
 //!
-//! The [`Fs`](crate::Fs) transfer methods run synchronously under the session
-//! lock, so they can't call back into the Tauri layer directly. Instead the
-//! caller passes a [`Transfer`]: a [`ProgressSink`] the transfer loop pushes
-//! byte counts to, plus a shared cancel flag it polls between chunks. mtp-core
-//! stays UI-agnostic — the app supplies a sink that emits Tauri events.
+//! The [`Fs`](crate::Fs) methods that can run for minutes — transfers, and the
+//! delete walk — run synchronously under the session lock, so they can't call
+//! back into the Tauri layer directly. Instead the caller passes a
+//! [`Transfer`]: a [`ProgressSink`] the loop pushes progress to, plus a shared
+//! cancel flag it polls between chunks/objects. mtp-core stays UI-agnostic —
+//! the app supplies a sink that emits Tauri events.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -17,6 +18,17 @@ pub trait ProgressSink: Send + Sync {
     /// Cumulative bytes transferred for the file most recently announced by
     /// [`file_start`](Self::file_start).
     fn file_progress(&self, transferred: u64);
+    /// Progress for work counted in whole objects rather than bytes: `done` of
+    /// `total` objects finished. Deleting moves no data but costs a device
+    /// round-trip per object, so a byte bar has nothing to show while a big
+    /// subtree goes away — this is what keeps that from looking like a hang.
+    ///
+    /// `total` is 0 while the job is still discovering how much work there is
+    /// (the delete's enumeration pass), so the UI can show a running tally
+    /// instead of a percentage. `name` is the top-level item being worked on —
+    /// the object the user picked, not the child currently being touched, which
+    /// the delete walk only ever knows by handle.
+    fn object_progress(&self, name: &str, done: u64, total: u64);
 }
 
 /// Per-transfer control handed to the [`Fs`](crate::Fs) tracked methods.
@@ -37,6 +49,7 @@ struct NoopSink;
 impl ProgressSink for NoopSink {
     fn file_start(&self, _: &str, _: u64) {}
     fn file_progress(&self, _: u64) {}
+    fn object_progress(&self, _: &str, _: u64, _: u64) {}
 }
 
 static NOOP_SINK: NoopSink = NoopSink;
@@ -44,7 +57,8 @@ static NEVER_CANCEL: AtomicBool = AtomicBool::new(false);
 
 impl Transfer<'static> {
     /// A transfer that reports nothing and never cancels — for callers that
-    /// don't surface progress (open / Quick Look previews).
+    /// don't surface progress (open / Quick Look previews, and the subtree
+    /// delete inside a Replace).
     pub fn noop() -> Transfer<'static> {
         Transfer {
             sink: &NOOP_SINK,
