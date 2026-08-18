@@ -497,7 +497,14 @@ async function clearOpenDevice() {
 // ---------------------------------------------------------------------------
 // List view
 
+// Bumped by every refresh so a listing that arrives after a newer refresh
+// started drops its result instead of painting rows from the wrong folder.
+// Overlapping refreshes are routine now that a drag can spring-open a folder
+// and be back out of it before the device has answered.
+let listGen = 0;
+
 async function refreshList() {
+  const gen = ++listGen;
   selected.clear();
   anchorIndex = -1;
   cursorIndex = -1;
@@ -523,7 +530,9 @@ async function refreshList() {
     renderList();
     return;
   }
-  allEntries = await window.api.invoke("list_dir", { path: cwd });
+  const listing = await window.api.invoke("list_dir", { path: cwd });
+  if (gen !== listGen) return; // superseded mid-flight; the newer refresh paints
+  allEntries = listing;
   renderFilterPills(); // pills reflect the formats in this folder
   applyFilter();       // derives `entries` from `allEntries` and renders
   renderBreadcrumb();
@@ -2081,6 +2090,12 @@ document.addEventListener("keydown", (ev) => {
 // whether the gesture drags one row or the multi-selection (Swift just fans out
 // one file promise per entry).
 let dragOutItems = [];
+// The same objects with the name and is_dir the listing knew, plus the folder
+// they came from. A drop can land in a different folder than the drag started
+// in — spring-loading opens folders mid-drag (see below) — so neither the
+// metadata nor the source directory survives as "whatever `cwd` is now".
+let dragOutMeta = [];
+let dragOriginDir = "";
 // While a row is pressed (mousedown until release/drag-end), the armed set is
 // FROZEN: hover changes must not re-arm it. Without this, the cursor crossing
 // neighbouring rows on the way into the drag re-armed Swift's `pending` to a row
@@ -2112,6 +2127,7 @@ function attachDragOut(tr, e) {
     if (dragArmLocked || marqueeActive) return; // mid-press / marquee: leave arm as-is
     window.api.invoke("drag_cancel");
     dragOutItems = [];
+    dragOutMeta = [];
   });
   tr.addEventListener("mousedown", () => {
     // Freeze the payload to the pressed row (or the selection it belongs to).
@@ -2159,6 +2175,8 @@ function armDragOut(hovered) {
     ];
   }
   dragOutItems = dragging.map((it) => it.path);
+  dragOutMeta = dragging;
+  dragOriginDir = cwd;
   window.api.invoke("drag_arm", {
     items: dragging.map((it) => ({
       object_path: it.path,
@@ -2890,6 +2908,10 @@ shortcutsHelp.addEventListener("mousedown", (ev) => {
 // device chip (= root) in the path bar, plus every folder row/tile in the
 // listing. We highlight the one under the cursor and, on an in-window drop,
 // relocate the dragged object there with the `move_object` command.
+//
+// A target held under the cursor rather than dropped on *opens* instead — see
+// the spring-loading block below, which is what brings folders outside the
+// current listing within reach of a drag.
 
 // The device chip is the path root, so it's the "move to top level" target.
 // Tagged once; the handler still gates on an open device and a real change.
@@ -2910,52 +2932,197 @@ function dropTargetAt(x, y, sourcePaths) {
 
 function clearDropHighlight() {
   if (dragHoverTarget) {
-    dragHoverTarget.classList.remove("drop-target-active");
+    dragHoverTarget.classList.remove("drop-target-active", "spring-arming");
     dragHoverTarget = null;
   }
 }
 
-async function commitMoveMany(sourcePaths, destDir) {
-  if (!sourcePaths.length) return;
-  // The drop target is usually NOT the folder we're viewing (a sub-folder row,
-  // an ancestor crumb, or the root chip), so fetch its listing once to detect
-  // clashes. `cwd` is the rare exception and reuses the in-memory listing.
-  let destNamesLower;
-  try {
-    const listing =
-      destDir === cwd ? allEntries : await window.api.invoke("list_dir", { path: destDir });
-    destNamesLower = new Set(listing.map((e) => e.name.toLowerCase()));
-  } catch (err) {
-    console.error("move: couldn't read destination", destDir, err);
-    alert(`Couldn't move:\n\n${err}`);
-    return;
+// --- Spring-loaded folders -------------------------------------------------
+//
+// One window, no tabs, no second pane: a drag could only reach folders that
+// happened to be in the listing it started from, so moving files to a sibling
+// of the current folder had nowhere to go — you'd have to cut, navigate, paste.
+// Finder's answer is to open the folder you hold the drag over, and this is
+// that. Hold over any drop target — a folder row/tile, an ancestor crumb, the
+// device chip — and we navigate there without ending the drag, so the folder
+// you actually want becomes a row you can drop on. Up the crumbs and back down
+// through rows reaches anywhere on the device.
+//
+// The excursion is temporary. It stays out of the back/forward history, and
+// the drop (or a release over nothing) puts the view back in the folder the
+// drag started in, ready for the next batch.
+const SPRING_DELAY_MS = 600; // hold time — matches the .spring-arming flash in style.css
+const SPRING_SETTLE_PX = 24; // cursor travel needed before the next spring can arm
+
+let springTimer = null; // pending open for the highlighted target
+let springAnchor = null; // {x, y} where the last spring fired; null once the cursor leaves it
+let springNavigated = false; // this drag has moved the view out of its origin folder
+let springLoading = false; // a spring-opened folder is still being listed
+let lastDragPoint = { x: 0, y: 0 };
+
+// Arm the hold-to-open timer for the highlighted target. No-ops when one is
+// already pending (a jittering hand mustn't keep restarting the countdown),
+// while the cursor still sits where the last folder sprang open (so one hold
+// opens one folder, not a chain of them), and for the folder already on screen.
+function armSpring(target) {
+  if (!target || springTimer || springAnchor || !openDeviceId) return;
+  const dest = target.dataset.droppath;
+  if (dest === cwd) return;
+  target.classList.add("spring-arming");
+  springTimer = setTimeout(() => {
+    springTimer = null;
+    springAnchor = lastDragPoint;
+    springOpen(dest);
+  }, SPRING_DELAY_MS);
+}
+
+function cancelSpring() {
+  if (springTimer) {
+    clearTimeout(springTimer);
+    springTimer = null;
   }
-  // is_dir is known when the source is in the current listing; else infer it.
-  const items = sourcePaths.map((p) => {
-    const name = p.split("/").pop();
-    const here = allEntries.find((e) => pathFor(e.name) === p);
-    const isDir = here ? here.is_dir : name.lastIndexOf(".") <= 0;
-    return { source: p, name, isDir };
-  });
-  const resolved = await resolveConflicts(items, destNamesLower, { verb: "move" });
-  if (!resolved || resolved.length === 0) return;
-  let failures = 0;
-  for (const r of resolved) {
-    try {
-      await window.api.moveObject(r.source, destDir, r.destName, r.overwrite);
-    } catch (err) {
-      failures++;
-      console.error("move failed", r.source, "→", destDir, err);
+}
+
+// Show `dest` mid-drag. Deliberately not navigateTo: the history is the user's
+// browsing trail and a drag isn't browsing — `cwd` is restored when the drag
+// ends. The listing that replaces this one brings its own folder rows and
+// crumbs, so the next hold can go deeper or back up.
+function springOpen(dest) {
+  if (!openDeviceId) return;
+  clearDropHighlight(); // the element it points at is about to be replaced
+  resetSearch(); // a filter typed for the old folder would hide rows in this one
+  springNavigated = true;
+  cwd = dest;
+  // Nothing in the folder we're landing in belongs to the drag, so the listing
+  // pane itself becomes a "drop here" target — the only way to aim at the
+  // current folder, since its own crumb is deliberately inert. Drag-only: the
+  // drag-end handler untags it.
+  listContainer.dataset.droppath = dest;
+  // Listing the folder is a device round-trip, and until it lands the rows on
+  // screen still belong to the folder we just left. Aiming is suspended for
+  // that stretch (see updateDragTarget) so a stale row can't be sprung or
+  // dropped on.
+  springLoading = true;
+  refreshList()
+    .catch((err) => console.error("spring-load failed", dest, err))
+    .finally(() => {
+      springLoading = false;
+    });
+}
+
+// Aim at whatever drop target is under (x, y), moving the highlight and
+// restarting the hold-to-open countdown when it changes.
+function updateDragTarget(x, y) {
+  if (springLoading) return; // the rows under the cursor are on their way out
+  const target = dropTargetAt(x, y, dragOutItems);
+  if (target !== dragHoverTarget) {
+    clearDropHighlight();
+    cancelSpring();
+    if (target) {
+      target.classList.add("drop-target-active");
+      dragHoverTarget = target;
     }
   }
-  if (failures) {
-    alert(`Couldn't move ${failures} item${failures > 1 ? "s" : ""}.`);
+  // Arm on every update, not just on a change of target: the cursor can settle
+  // on a target while the previous spring still blocks it, and this is what
+  // starts the countdown once that block clears.
+  armSpring(dragHoverTarget);
+}
+
+// --- Edge auto-scroll ------------------------------------------------------
+//
+// Spring-loading is only half an answer if the folder you want is below the
+// fold — you can't scroll a listing with the mouse button already down. So
+// holding the drag near the top or bottom edge scrolls it, Finder-style.
+// Position events arrive only while the cursor moves, so this runs on its own
+// interval and re-aims at the (stationary) cursor after each step.
+const EDGE_SCROLL_ZONE_PX = 36; // distance from an edge that starts scrolling
+const EDGE_SCROLL_STEP_PX = 14; // per tick
+const EDGE_SCROLL_INTERVAL_MS = 30;
+
+let edgeScrollTimer = null;
+let edgeScrollDir = 0; // -1 up, 1 down, 0 not scrolling
+
+function updateEdgeScroll(x, y) {
+  const r = listContainer.getBoundingClientRect();
+  const inside = x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+  let dir = 0;
+  if (inside && y < r.top + EDGE_SCROLL_ZONE_PX) dir = -1;
+  else if (inside && y > r.bottom - EDGE_SCROLL_ZONE_PX) dir = 1;
+  if (dir === edgeScrollDir) return;
+  stopEdgeScroll();
+  edgeScrollDir = dir;
+  if (dir !== 0) edgeScrollTimer = setInterval(edgeScrollTick, EDGE_SCROLL_INTERVAL_MS);
+}
+
+function edgeScrollTick() {
+  const before = listContainer.scrollTop;
+  listContainer.scrollTop = before + edgeScrollDir * EDGE_SCROLL_STEP_PX;
+  // At the end of the list nothing moved, so the target under the cursor is
+  // still the one we lit — leave it (and any armed spring) alone.
+  if (listContainer.scrollTop === before) return;
+  updateDragTarget(lastDragPoint.x, lastDragPoint.y);
+}
+
+function stopEdgeScroll() {
+  if (edgeScrollTimer) {
+    clearInterval(edgeScrollTimer);
+    edgeScrollTimer = null;
   }
-  // The objects left `cwd` and landed in `destDir`; cached folder sizes along
-  // both chains are now wrong. Invalidate ancestors of each, then refresh.
-  invalidateAncestorsOf(cwd);
-  invalidateAncestorsOf(destDir);
-  await Promise.all([refreshList(), refreshStorage()]);
+  edgeScrollDir = 0;
+}
+
+// Move the dragged objects into `destDir`. Both ends of the move are passed in
+// rather than read off `cwd`, because a spring excursion may have left the view
+// somewhere else entirely; `returnHome` then brings it back to `sourceDir` once
+// the move is done. `items` carry the name and is_dir the listing knew at the
+// time the drag was armed.
+async function commitMoveMany(items, sourceDir, destDir, returnHome) {
+  let moved = false;
+  try {
+    if (!items.length) return;
+    // The drop target is usually NOT the folder we're viewing (a sub-folder
+    // row, an ancestor crumb, or the root chip), so fetch its listing once to
+    // detect clashes. `cwd` is the exception and reuses the in-memory listing.
+    let destNamesLower;
+    try {
+      const listing =
+        destDir === cwd ? allEntries : await window.api.invoke("list_dir", { path: destDir });
+      destNamesLower = new Set(listing.map((e) => e.name.toLowerCase()));
+    } catch (err) {
+      console.error("move: couldn't read destination", destDir, err);
+      alert(`Couldn't move:\n\n${err}`);
+      return;
+    }
+    const resolved = await resolveConflicts(
+      items.map((it) => ({ source: it.path, name: it.name, isDir: it.isDir })),
+      destNamesLower,
+      { verb: "move" },
+    );
+    if (!resolved || resolved.length === 0) return;
+    let failures = 0;
+    for (const r of resolved) {
+      try {
+        await window.api.moveObject(r.source, destDir, r.destName, r.overwrite);
+        moved = true;
+      } catch (err) {
+        failures++;
+        console.error("move failed", r.source, "→", destDir, err);
+      }
+    }
+    if (failures) {
+      alert(`Couldn't move ${failures} item${failures > 1 ? "s" : ""}.`);
+    }
+    // The objects left `sourceDir` and landed in `destDir`; cached folder sizes
+    // along both chains are now wrong. Invalidate ancestors of each.
+    invalidateAncestorsOf(sourceDir);
+    invalidateAncestorsOf(destDir);
+  } finally {
+    // A spring excursion ends with the drag that opened it, whether or not
+    // anything moved — including when the conflict dialog was cancelled.
+    if (returnHome && openDeviceId) cwd = sourceDir;
+    if (moved || returnHome) await Promise.all([refreshList(), refreshStorage()]);
+  }
 }
 
 window.api.onDragInternal(({ payload }) => {
@@ -2972,14 +3139,13 @@ window.api.onDragInternal(({ payload }) => {
       markDraggingRows();
       draggingMarked = true;
     }
-    const target = dropTargetAt(x, y, sources);
-    if (target !== dragHoverTarget) {
-      clearDropHighlight();
-      if (target) {
-        target.classList.add("drop-target-active");
-        dragHoverTarget = target;
-      }
+    // Moved clear of the folder that last sprang open? Then holding counts again.
+    if (springAnchor && Math.hypot(x - springAnchor.x, y - springAnchor.y) > SPRING_SETTLE_PX) {
+      springAnchor = null;
     }
+    lastDragPoint = { x, y };
+    updateEdgeScroll(x, y);
+    updateDragTarget(x, y);
     return;
   }
   // Any other phase = the drag ended. Commit to whatever target was lit at
@@ -2987,22 +3153,45 @@ window.api.onDragInternal(({ payload }) => {
   // tracked hover target over re-hit-testing the end coordinates, because
   // AppKit's `endedAt` doesn't reliably report the release point (it can hand
   // back a slide-back/origin point, which would miss the target). Fall back to
-  // a coordinate hit-test only if nothing was highlighted.
+  // a coordinate hit-test only if nothing was highlighted — and not even then
+  // once a spring excursion is in play: the listing under that point isn't the
+  // one the drag started in, so a slide-back point would read as "drop into the
+  // folder we just opened" and move files the user was cancelling. Any real
+  // release in there follows a move that lit the target anyway.
   pathBar.classList.remove("drag-active");
   internalDragInProgress = false; // the native drag likely consumed our mouseup
-  const target = dragHoverTarget || dropTargetAt(x, y, sources);
+  cancelSpring();
+  stopEdgeScroll();
+  const target = dragHoverTarget || (springNavigated ? null : dropTargetAt(x, y, sources));
+  const destDir = target ? target.dataset.droppath : null; // "" = device root
   clearDropHighlight();
-  if (target && openDeviceId && sources.length) {
-    const destDir = target.dataset.droppath; // "" = device root
-    // Skip a no-op move into the folder the objects already live in (e.g.
-    // dropping on the chip while at root). dropTargetAt already excluded a drop
-    // on a dragged object's own row.
-    if (destDir !== cwd) commitMoveMany(sources, destDir);
-  }
+  // Everything below is synchronous so the next gesture can start immediately —
+  // the move runs after it, and may sit on a conflict dialog for a while.
+  // Capture what that move needs first.
+  const items = dragOutMeta;
+  const sourceDir = dragOriginDir;
+  const home = springNavigated; // a spring excursion to undo when this is done
+  delete listContainer.dataset.droppath; // the pane is a target only mid-drag
+  springNavigated = false;
+  springLoading = false;
+  springAnchor = null;
   dragOutItems = []; // gesture finished; release the armed set
+  dragOutMeta = [];
   clearDraggingRows();
   draggingMarked = false;
   dragArmLocked = false; // press is over; hover may re-arm again
+  // Skip a no-op move into the folder the objects already live in (e.g.
+  // dropping on the chip while at root, or on the folder a spring excursion
+  // started from). dropTargetAt already excluded a drop on a dragged object's
+  // own row.
+  if (destDir !== null && destDir !== sourceDir && openDeviceId && items.length) {
+    commitMoveMany(items, sourceDir, destDir, home).catch((err) =>
+      console.error("drag move failed", err),
+    );
+  } else if (home && openDeviceId) {
+    cwd = sourceDir; // nothing moved, but the excursion still has to be undone
+    refreshList().catch((err) => console.error("returning from a spring failed", err));
+  }
 });
 
 // ---------------------------------------------------------------------------

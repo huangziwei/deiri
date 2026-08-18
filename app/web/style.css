@@ -704,6 +704,25 @@ tbody tr.selected td { background: #d0e3ff; }
 #grid .tile.drop-target-active { background: #0066cc; }
 #grid .tile.drop-target-active .tile-name { color: #fff; }
 
+/* Spring-loading (see armSpring): a target held under the drag flashes twice
+   and then opens, the same "keep holding and I'll take you there" cue Finder
+   gives. Two 0.3s cycles fill the SPRING_DELAY_MS hold in main.js — keep them
+   in step. The rows animate their cells, since that's where the fill lives. */
+@keyframes spring-flash {
+  50% { opacity: 0.35; }
+}
+#list-body tr.spring-arming td,
+#grid .tile.spring-arming,
+.crumb-link.spring-arming,
+#device-chip.spring-arming {
+  animation: spring-flash 0.3s ease-in-out 2;
+}
+
+/* Drop-into-this-folder target. The listing pane only carries a droppath while
+   a drag has spring-opened a folder — it's how you aim at the folder you're
+   looking at, whose own crumb is inert — so this ring appears mid-drag only. */
+#list-container.drop-target-active { box-shadow: inset 0 0 0 2px #0066cc; }
+
 /* Pending-cut ghost: items stashed by ⌘X (or the Cut menu) dim until they're
    pasted (moved) or the cut is cleared. Opacity reads the same in both themes. */
 #list-body tr.cut td { opacity: 0.45; }
